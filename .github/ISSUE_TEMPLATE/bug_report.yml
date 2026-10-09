@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem with reading, playback, highlighting, or setup.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. For setup questions, use Discussions.
+        Issues are public: use synthetic text and remove private document URLs, credentials, book content, and identifying details from screenshots or logs.
+        Report security vulnerabilities through [SECURITY.md](https://github.com/DicksonWu654/sonora/blob/main/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Sonora version
+      description: Find it on the Sonora card in your browser's extensions page.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and browser
+      placeholder: "Ubuntu 24.04 x86-64, Brave 1.x or Chrome 1xx"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the kind of page, voice and speed if relevant, and a minimal synthetic example. Share a URL only if it is safe for everyone to see.
+      placeholder: |
+        1. Open a page containing ...
+        2. Activate Sonora and click ...
+        3. Choose ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact error message, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional details
+      description: Optional screenshots or relevant log excerpts. Review and redact them before posting; do not attach your runtime folder or access credentials.

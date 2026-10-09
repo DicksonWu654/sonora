@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://github.com/DicksonWu654/sonora/discussions
+    about: Ask questions, share ideas, and get help installing Sonora.
+  - name: Private security report
+    url: https://github.com/DicksonWu654/sonora/security/advisories/new
+    about: Report suspected vulnerabilities privately. Do not post credentials or private content in issues.

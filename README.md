@@ -1,5 +1,7 @@
 # Sonora
 
+[![Checks](https://github.com/DicksonWu654/sonora/actions/workflows/checks.yml/badge.svg)](https://github.com/DicksonWu654/sonora/actions/workflows/checks.yml) · [MIT license](LICENSE) · [Latest release](https://github.com/DicksonWu654/sonora/releases/latest)
+
 Click text on a web page and hear it read aloud with a natural, local voice. Sonora works in **Brave and Chrome**, including Google Docs paragraphs and tables, and highlights each spoken word directly on the page. Pause, switch voices, jump to another passage, or listen at **0.75×–3× without changing the voice's pitch**.
 
 Speech runs on your computer with Kokoro 82M. There is no subscription, API key, or cloud speech service. You can also turn PDF, EPUB, TXT, and Markdown books into downloadable MP3s and a private podcast feed.
@@ -13,7 +15,7 @@ Speech runs on your computer with Kokoro 82M. There is no subscription, API key,
 
 Open a page, click Sonora's toolbar icon, and click the text you want to hear. For an already open Google Doc, refresh it once after installing the extension.
 
-**[Detailed installation and troubleshooting →](INSTALL.md)** · **[Privacy →](PRIVACY.md)**
+**[Detailed installation and troubleshooting →](INSTALL.md)** · **[Privacy →](PRIVACY.md)** · **[Questions and help →](https://github.com/DicksonWu654/sonora/discussions)**
 
 Linux x86-64 is tested. Launchers and dependency configuration are provided for Windows x86-64 and Apple Silicon Macs; those platforms have not yet been tested on real hardware. Intel Macs and Windows/Linux ARM are not supported by this installer. A GPU is optional.
 
@@ -115,3 +117,9 @@ Private text, credentials, checkpoints, logs, and MP3s live in `.runtime/` (or `
 ## License
 
 Sonora's code is available under the [MIT license](LICENSE). The voice model and third-party assets have their own [licenses and notices](THIRD_PARTY_NOTICES.md).
+
+## Contributing and community
+
+Sonora is open source, and contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, the code map, testing, and submitting a pull request. Documentation, accessibility improvements, and testing on Windows and Apple Silicon Macs are useful ways to help.
+
+Use [Discussions](https://github.com/DicksonWu654/sonora/discussions) for questions and ideas, and [issues](https://github.com/DicksonWu654/sonora/issues/new/choose) for reproducible bugs or feature requests. Follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately through [SECURITY.md](SECURITY.md), and keep private documents and credentials out of public reports.

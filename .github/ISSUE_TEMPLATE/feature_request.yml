@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement to Sonora.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing requests first. Early ideas and questions are welcome in Discussions.
+        This is a public form; use examples that do not contain private text or links.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the task you are trying to accomplish and what gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain how you would expect Sonora to work.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or examples
+      description: Optional workarounds, sketches, accessibility considerations, or examples from other tools.
