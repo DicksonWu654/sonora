@@ -62,7 +62,7 @@
     const walker = document.createTreeWalker(node, 4); // SHOW_TEXT
     while (walker.nextNode()) {
       const child = walker.currentNode, parent = child.parentElement;
-      if (!parent || parent.closest('script,style,noscript')) continue;
+      if (!parent || parent.closest('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],.sr-only,.visually-hidden')) continue;
       if (node.matches('li')) {
         const nestedList = parent.closest('ul,ol,menu');
         if (nestedList && node.contains(nestedList)) continue;
@@ -71,7 +71,7 @@
       const range = document.createRange();
       range.selectNodeContents(child);
       if (![...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) continue;
-      segments.push({ node: child, start: text.length, end: text.length + child.data.length });
+      segments.push({ node: child, value: child.data, start: text.length, end: text.length + child.data.length });
       text += child.data;
     }
     return { ...compactMap(text), segments };
@@ -126,7 +126,7 @@
   }
 
   function createTracker(document, container) {
-    let words = [], spans = [], item = null, index = null, sourceText = '', sourceBase = -1, current = -1;
+    let words = [], spans = [], item = null, index = null, indexedNode = null, sourceText = '', sourceCompact = '', sourceBase = -1, current = -1;
     const boxes = [];
     const context = document.createElement('canvas').getContext('2d');
     const window = document.defaultView;
@@ -161,6 +161,7 @@
       clearPaint();
       item = passage;
       index = null;
+      indexedNode = null;
       sourceBase = -1;
       spans = [];
       sourceText = entry?.text || '';
@@ -169,15 +170,31 @@
         && Number.isInteger(word.textOffset) && Number.isInteger(word.length) && word.textOffset >= 0 && word.length > 0 && word.textOffset + word.length <= passage.text.length).sort((a, b) => a.start - b.start) : [];
       if (!words.length) return;
       const source = compactMap(sourceText);
+      sourceCompact = source.text;
       spans = words.map(word => compactSpan(source, item.blockOffset + word.textOffset, word.length));
       if (!entry.rects && entry.node?.isConnected) {
         index = domIndex(entry.node, document);
+        indexedNode = entry.node;
         sourceBase = index.text.indexOf(source.text);
       }
     }
     function update(entry, time, surface) {
       const next = wordAt(words, time);
-      if (!entry || entry.text !== sourceText || next < 0) { clearPaint(); return; }
+      if (!entry || !item || entry.text.slice(item.blockOffset, item.blockOffset + item.text.length) !== item.text || next < 0) { clearPaint(); return; }
+      if (entry.text !== sourceText) {
+        sourceText = entry.text;
+        const source = compactMap(sourceText);
+        sourceCompact = source.text;
+        spans = words.map(word => compactSpan(source, item.blockOffset + word.textOffset, word.length));
+        index = null;
+        current = -1;
+      }
+      if (!entry.rects && entry.node?.isConnected && (!index || entry.node !== indexedNode || index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value))) {
+        index = domIndex(entry.node, document);
+        indexedNode = entry.node;
+        sourceBase = index.text.indexOf(sourceCompact);
+        current = -1;
+      }
       const span = spans[next];
       if (entry.rects) {
         current = next;
@@ -193,7 +210,7 @@
         else paintBoxes([...range.getClientRects()], { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
       }
     }
-    function reset() { clearPaint(); words = []; spans = []; item = index = null; sourceText = ''; sourceBase = -1; }
+    function reset() { clearPaint(); words = []; spans = []; item = index = indexedNode = null; sourceText = sourceCompact = ''; sourceBase = -1; }
     return { prepare, update, reset };
   }
 

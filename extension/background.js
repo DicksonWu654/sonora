@@ -52,7 +52,7 @@ async function injectReader(tabId) {
         await chrome.scripting.insertCSS({ target: { tabId }, files: ['page.css'] });
         cssInjected = true;
       }
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['text.js', 'tempo.js', 'docs.js', 'words.js', 'overlay.js'] });
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['text.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js'] });
       return;
     } catch (error) {
       lastError = error;

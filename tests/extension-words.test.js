@@ -114,3 +114,59 @@ test('edited source, mismatched chunks, missing or invalid timings never produce
     assert.equal(children.length, 0);
   }
 });
+
+test('appending to a streaming passage keeps timings for its unchanged spoken prefix', () => {
+  const { tracker, children } = trackerFixture(), entry = docsEntry();
+  tracker.prepare(entry, { text: entry.text, blockOffset: 0 }, [{ start: 0, end: 1, textOffset: 0, length: 4 }]);
+  tracker.update({ ...entry, text: entry.text + ' More text arrived.' }, 0.5, surface);
+  assert.equal(children[0].dataset.word, 'Read');
+});
+
+function domTrackerFixture() {
+  const highlights = new Map();
+  const document = {
+    defaultView: { CSS: { highlights }, Highlight: class extends Set { constructor(...ranges) { super(ranges); } }, getComputedStyle: () => ({ visibility: 'visible' }) },
+    createElement: () => ({ getContext: () => context }),
+    createTreeWalker: node => {
+      let next = 0;
+      return { nextNode() { this.currentNode = node.textNodes[next++]; return Boolean(this.currentNode); } };
+    },
+    createRange: () => ({
+      selectNodeContents() {}, getClientRects: () => [{ width: 100, height: 20 }],
+      setStart(node, offset) { this.startContainer = node; this.startOffset = offset; },
+      setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; }
+    })
+  };
+  const makeNode = text => {
+    const node = { isConnected: true, matches: () => false };
+    node.textNodes = [{ data: text, isConnected: true, parentElement: { closest: () => null } }];
+    return node;
+  };
+  return { tracker: createTracker(document, {}), highlights, makeNode };
+}
+
+test('word highlight reattaches after React replaces text nodes during the same spoken word', () => {
+  const { tracker, highlights, makeNode } = domTrackerFixture();
+  const original = makeNode('Read this'), replacement = makeNode('Read this');
+  const passage = { text: 'Read this', blockOffset: 0 };
+  tracker.prepare({ node: original, text: passage.text }, passage, [{ start: 0, end: 1, textOffset: 5, length: 4 }]);
+  tracker.update({ node: original, text: passage.text }, 0.2, null);
+  original.isConnected = original.textNodes[0].isConnected = false;
+  tracker.update({ node: replacement, text: passage.text }, 0.3, null);
+  const range = [...highlights.get('sonora-current-word')][0];
+  assert.equal(range.startContainer, replacement.textNodes[0]);
+  assert.equal(range.startOffset, 5);
+  assert.equal(range.endOffset, 9);
+});
+
+test('normalization-equivalent live text edits refresh DOM offsets without interrupting a word', () => {
+  const { tracker, highlights, makeNode } = domTrackerFixture();
+  const node = makeNode('Read this'), passage = { text: 'Read this', blockOffset: 0 };
+  tracker.prepare({ node, text: passage.text }, passage, [{ start: 0, end: 1, textOffset: 5, length: 4 }]);
+  tracker.update({ node, text: passage.text }, 0.2, null);
+  node.textNodes[0].data = 'Read  this';
+  tracker.update({ node, text: passage.text }, 0.3, null);
+  const range = [...highlights.get('sonora-current-word')][0];
+  assert.equal(range.startOffset, 6);
+  assert.equal(range.endOffset, 10);
+});

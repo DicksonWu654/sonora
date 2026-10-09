@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.0';
+  const OVERLAY_VERSION = '0.4.1';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -17,6 +17,8 @@
   let docsSurface = null;
   let docsEntries = [];
   let docsDocumentChanged = false;
+  let reconcileEntries = window.SonoraPassages.createReconciler();
+  let pageEntries = [];
   const source = findReadableSource();
   let pageText = cleanText(source.text).slice(0, MAX_PAGE_CHARS);
   let blockEntries = makeBlockEntries(source.blocks);
@@ -553,15 +555,15 @@
     }
     startQueue(entry.index);
   }
-  function updateBlocks(nextBlocks) {
+  function updateBlocks(nextBlocks, navigated = false) {
     const nextEntries = makeBlockEntries(nextBlocks);
-    const changed = isGoogleDocsPage() ? docsDocumentChanged : blockEntries.length !== nextEntries.length || blockEntries.some((entry, index) => {
-      const next = nextEntries[index];
-      return !next || next.node !== entry.node || next.text !== entry.text;
-    });
+    const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
+    const activeEntry = activeItem && nextEntries.find(entry => entry.key === activeItem.blockKey);
+    const edited = !isGoogleDocsPage() && activeEntry && !window.SonoraPassages.matchesPassage(activeEntry, activeItem);
+    const changed = isGoogleDocsPage() ? docsDocumentChanged : navigated || edited;
     if (changed && state.queue.length) {
-      // Do not continue narrating text that was removed or replaced by a SPA,
-      // editor, or live document update. The next click builds a fresh queue.
+      // Keep the selected queue through unrelated updates and DOM redraws.
+      // A new page or an edit to the spoken text ends the old session.
       state.revision++;
       state.pendingStart = null;
       state.pendingRender = false;
@@ -579,6 +581,7 @@
       els.track.style.width = '0%';
       clearCurrentBlock();
       updateTransport();
+      if (state.ready) setStatus(edited ? 'This passage changed — click it to read the updated text.' : readyMessage(), 'ready');
     }
     const nextNodes = new Set(nextEntries.flatMap(entry => entry.nodes || [entry.node]));
     knownBlocks.forEach(node => {
@@ -617,6 +620,8 @@
   }
   function refreshBlocks() {
     refreshTimer = null;
+    const navigated = !isGoogleDocsPage() && window.SonoraPassages.pageIdentity(sourceUrl) !== window.SonoraPassages.pageIdentity(location.href);
+    if (navigated) { pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
     if (sourceUrl !== location.href || !source.root?.isConnected) {
       const nextSource = findReadableSource();
       sourceUrl = location.href;
@@ -628,7 +633,7 @@
       els.title.textContent = source.title || document.title || 'Untitled page';
     }
     const nextBlocks = selectReadableBlocks(source.root, source.noiseSelector);
-    updateBlocks(nextBlocks);
+    updateBlocks(nextBlocks, navigated);
   }
   function scheduleBlockRefresh() {
     if (refreshTimer) return;
@@ -827,12 +832,7 @@
     if (isGoogleDocsPage() && node.matches?.('g[role="paragraph"]')) {
       return cleanText([...node.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '));
     }
-    if (node.matches?.('li') && node.querySelector?.('ul, ol, menu')) {
-      const clone = node.cloneNode(true);
-      clone.querySelectorAll('ul, ol, menu').forEach(list => list.remove());
-      return cleanText(clone.innerText || clone.textContent || '');
-    }
-    return cleanText(node.innerText || node.getAttribute?.('aria-label') || node.textContent || '');
+    return window.SonoraPassages.readableText(node, cleanText);
   }
 
   function isGoogleDocsPage() {
@@ -852,8 +852,10 @@
       docsEntries = window.SonoraDocs.mergePassages(docsEntries, window.SonoraDocs.passages(surface, cleanText), cleanText);
       return docsEntries;
     }
-    return nodes.map((node, index) => ({ node, index, text: readableText(node) }))
-      .filter(entry => entry.text.length > (isGoogleDocsPage() || entry.node.matches('td, th') ? 0 : 1));
+    const incoming = nodes.map(node => ({ node, text: readableText(node), scope: window.SonoraPassages.scopeFor(node) }))
+      .filter(entry => entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
+    pageEntries = reconcileEntries(pageEntries, incoming);
+    return pageEntries;
   }
 
   function selectReadableBlocks(root, noiseSelector) {
@@ -885,8 +887,7 @@
           : googlePages;
     const raw = [...new Set([...semantic, ...googleBlocks, ...custom])];
     const blocks = raw.filter(block => {
-      if (block.closest(noiseSelector)) return false;
-      if (block.getClientRects && !block.getClientRects().length && !block.textContent?.trim()) return false;
+      if (block.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(block)) return false;
       const value = readableText(block);
       if (value.length <= (block.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1)) return false;
       if (block.matches('.kix-page') && (googleParagraphs.length || googleLines.length || googleLineContent.length)) return false;
@@ -894,6 +895,7 @@
       if (block.matches('.kix-lineview-content') && block.closest('.kix-lineview')) return false;
       if (block.matches('p, h1, h2, h3, h4, h5, h6, blockquote, pre') && block.closest('td, th, [role="cell"], [role="gridcell"]')) return false;
       if (block.matches('li, dt, dd') && block.querySelector('p, h1, h2, h3, h4, h5, h6, blockquote, pre')) return false;
+      if (block.matches('blockquote') && block.querySelector('p,blockquote')) return false;
       if (block.matches(customSelector) && !block.matches('.kix-paragraphrenderer, .kix-page') && block.querySelector(`${semanticSelector}, ${customSelector}`)) return false;
       return true;
     });
@@ -901,7 +903,7 @@
       ? root
       : root.querySelector?.('[contenteditable="true"]');
     const generic = [...root.querySelectorAll('div, section')].filter(node => {
-      if (node.closest(noiseSelector)) return false;
+      if (node.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(node)) return false;
       const value = readableText(node);
       const directText = cleanText([...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.nodeValue).join(' '));
       return value.length > 1 && directText.length > 1 && !node.querySelector(semanticSelector);
@@ -909,15 +911,14 @@
     const leafGeneric = generic.filter(node => !generic.some(parent => parent !== node && parent.contains(node)));
     const uncoveredGeneric = leafGeneric.filter(node => !blocks.some(block => block.contains(node) || node.contains(block)));
     const accessibleLeaves = [...root.querySelectorAll(accessibleTextSelector)].filter(node => {
-      if (node.closest(noiseSelector)) return false;
+      if (node.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(node)) return false;
       const value = readableText(node);
       if (value.length <= 1 || node.querySelector(accessibleTextSelector)) return false;
-      if (node.getClientRects && !node.getClientRects().length && !node.textContent?.trim()) return false;
       return true;
     });
     const pageOnlyGoogleBlocks = blocks.length > 0 && blocks.every(block => block.matches('.kix-page, .kix-lineview-content'));
     if (pageOnlyGoogleBlocks && accessibleLeaves.length) return accessibleLeaves;
-    if (blocks.length || uncoveredGeneric.length) return [...blocks, ...uncoveredGeneric];
+    if (blocks.length || uncoveredGeneric.length) return [...blocks, ...uncoveredGeneric].sort((a, b) => a === b ? 0 : (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
     if (accessibleLeaves.length) return accessibleLeaves;
     if (editable && readableText(editable).length > 1 && !editable.closest(noiseSelector)) return [editable];
     if (root.matches?.('.kix-appview-editor, #kix-appview-editor, [class*="kix-appview-editor"], #docs-editor, .docs-editor, [aria-label*="Document content" i], [role="textbox"]') && readableText(root).length > 1) return [root];
@@ -930,6 +931,7 @@
     const noiseSelector = [
       'script', 'style', 'noscript', 'template', 'nav', 'header', 'footer', 'aside', 'form',
       '[role="navigation"]', '[role="banner"]', '[role="toolbar"]', '[role="menu"]', '[role="menubar"]', '[role="tablist"]', '[role="button"]',
+      '[role="tooltip"]', '[hidden]', '[inert]', '.sr-only', '.visually-hidden',
       '[aria-label*="navigation" i]', '[aria-label*="toolbar" i]', '[aria-label*="menu" i]',
       '.infobox', '.navbox', '.metadata', '.mw-references-wrap', '.reflist', '.references', '.reference',
       '.mw-editsection', '.toc', '.hatnote', '.thumb', '.gallery', '.portal', '.catlinks', '.printfooter',
@@ -949,6 +951,12 @@
         noiseSelector,
         truncated: text.length > MAX_PAGE_CHARS
       };
+    }
+    if (/^(chatgpt\.com|chat\.openai\.com)$/i.test(location.hostname)) {
+      const root = document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body;
+      const blocks = selectReadableBlocks(root, noiseSelector);
+      const text = blocks.map(readableText).filter(Boolean).join('\n\n');
+      return { root, blocks, text, noiseSelector, title: cleanText(document.title || 'ChatGPT'), truncated: text.length > MAX_PAGE_CHARS };
     }
     const selectors = [
       '#mw-content-text .mw-parser-output', '#mw-content-text',

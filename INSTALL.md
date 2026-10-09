@@ -93,6 +93,7 @@ Download the new ZIP, stop the launcher, and copy its files over your existing S
 | First-time download was interrupted | Run the launcher again. Downloads and already installed dependencies are reused. |
 | Google Docs has no passage highlights | Reload the extension, then refresh the Doc. |
 | Extension still behaves like an old version | Click **Reload** in the extensions page and refresh the website. |
+| ChatGPT stops after a few words or loses the selected passage | Update to Sonora 0.4.1 or newer, reload the extension, and refresh ChatGPT. This fixes interruptions from unrelated conversation updates and hidden speaker labels. |
 | Server says the port is in use | Check whether Sonora is already running. Stop the old instance before starting a new one. |
 | Browser cannot load the extension | Extract the ZIP first, then select its **extension** folder rather than the ZIP or the outer Sonora folder. |
 
