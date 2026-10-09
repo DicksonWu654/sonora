@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.3.1';
+  const OVERLAY_VERSION = '0.3.2';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -70,7 +70,7 @@
       <header class="top"><span class="mark" aria-hidden="true">◒</span><span class="brand">sonora</span><span class="local"><i></i> local voice</span><button class="icon minimize" type="button" aria-label="Minimize Sonora">−</button><button class="icon close" type="button" aria-label="Close Sonora">×</button></header>
       <section class="heading"><p class="eyebrow">CLICK PAGE TEXT TO READ</p><h2></h2><p class="meta"></p></section>
       <div class="status"><i class="dot"></i><span></span></div>
-      <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label>Speed<select class="speed" aria-label="Speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label></section>
+      <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label>Speed<select class="speed" aria-label="Speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="2.25">2.25×</option><option value="2.5">2.5×</option><option value="2.75">2.75×</option><option value="3">3×</option></select></label></section>
       <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any highlighted text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
       <footer class="bottom"><div class="transport"><button class="stop" type="button">Stop</button><button class="play" type="button"><span class="play-icon">▶</span> <span class="play-label">Play from top</span></button></div><div class="track" aria-hidden="true"><i></i></div><p class="hint">Your page stays in place while Sonora reads.</p></footer>
       <audio preload="auto"></audio>
@@ -127,6 +127,7 @@
     if (sourceUrl !== location.href) scheduleBlockRefresh();
   }, 1000);
   const knownBlocks = new Set();
+  const changedSettings = new Set();
   const pageClass = PAGE_CLASS;
   const currentClass = CURRENT_CLASS;
   let docsHover = null;
@@ -141,6 +142,7 @@
     return 'Ready — click page text to begin.';
   }
   function saveSetting(key, value) {
+    changedSettings.add(key);
     try {
       const result = chrome.storage?.local?.set({ [key]: value });
       result?.catch?.(() => {});
@@ -152,8 +154,8 @@
       if (!storage?.get) return;
       Promise.resolve(storage.get(['sonoraSpeed', 'sonoraVoice'])).then(saved => {
         if (state.closed) return;
-        if (saved?.sonoraSpeed !== undefined && [...els.speed.options].some(option => option.value === String(saved.sonoraSpeed))) els.speed.value = String(saved.sonoraSpeed);
-        if (saved?.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
+        if (!changedSettings.has('sonoraSpeed') && saved?.sonoraSpeed !== undefined && [...els.speed.options].some(option => option.value === String(saved.sonoraSpeed))) els.speed.value = String(saved.sonoraSpeed);
+        if (!changedSettings.has('sonoraVoice') && saved?.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
       }).catch(() => {});
     } catch { /* Storage can be unavailable in restricted test pages. */ }
   }

@@ -42,13 +42,13 @@ async function loadSettings() {
     state.api = validation.normalizeServerUrl(saved.sonoraServer);
     els.server.value = state.api;
     const speed = Number(saved.sonoraSpeed);
-    if (Number.isFinite(speed) && speed >= 0.6 && speed <= 2) { els.speed.value = String(speed); updateSpeed(); }
+    if (Number.isFinite(speed) && speed >= 0.6 && speed <= 3) { els.speed.value = String(speed); updateSpeed(); }
     if (saved.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
   } catch {
     els.server.value = state.api;
   }
 }
-function updateSpeed() { const raw = Number(els.speed.value); const speed = Number.isFinite(raw) ? Math.min(2, Math.max(0.6, raw)) : 1; els.speed.value = String(speed); els.speedValue.textContent = `${speed.toFixed(speed % 1 ? 2 : 0)}×`; els.audio.playbackRate = speed; chrome.storage.local.set({ sonoraSpeed: speed }).catch?.(() => {}); }
+function updateSpeed() { const raw = Number(els.speed.value); const speed = Number.isFinite(raw) ? Math.min(3, Math.max(0.6, raw)) : 1; els.speed.value = String(speed); els.speedValue.textContent = `${speed.toFixed(speed % 1 ? 2 : 0)}×`; els.audio.playbackRate = speed; chrome.storage.local.set({ sonoraSpeed: speed }).catch?.(() => {}); }
 async function request(path, options = {}) {
   state.api = validation.normalizeServerUrl(state.api);
   const response = await fetch(`${state.api}${path}`, options);

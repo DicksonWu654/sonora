@@ -2,7 +2,7 @@
   // Waveform-similarity overlap-add: change duration by skipping/repeating
   // aligned windows, never by resampling (which changes the voice's pitch).
   function stretch(channels, sampleRate, rate) {
-    if (!Number.isFinite(rate) || rate < 0.5 || rate > 2.5) throw new Error('Invalid playback speed.');
+    if (!Number.isFinite(rate) || rate < 0.5 || rate > 3) throw new Error('Invalid playback speed.');
     const length = channels[0]?.length || 0;
     if (!length || rate === 1) return channels;
     const frame = Math.max(32, Math.round(sampleRate * 0.04));

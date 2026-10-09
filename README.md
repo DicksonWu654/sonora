@@ -1,6 +1,6 @@
 # Sonora
 
-Click text on a web page and hear it read aloud with a natural, local voice. Sonora works in **Brave and Chrome**, including Google Docs paragraphs and tables. Pause, switch voices, jump to another passage, or listen at **0.75×–2× without changing the voice's pitch**.
+Click text on a web page and hear it read aloud with a natural, local voice. Sonora works in **Brave and Chrome**, including Google Docs paragraphs and tables. Pause, switch voices, jump to another passage, or listen at **0.75×–3× without changing the voice's pitch**.
 
 Speech runs on your computer with Kokoro 82M. There is no subscription, API key, or cloud speech service. You can also turn PDF, EPUB, TXT, and Markdown books into downloadable MP3s and a private podcast feed.
 
@@ -61,7 +61,7 @@ Open <http://127.0.0.1:8787>. Import a book, choose Heart or Bella, and select *
 
 ## Read page text in Chrome or Brave
 
-The repository includes a small Manifest V3 extension in `extension/`. Click its toolbar button on any readable page and it opens an in-page Sonora panel: article text blocks, table cells, and headings on the page become clickable, with Heart or Bella voice selection, a 0.75×–2× speed control, passage progress, and background rendering of the next passage. Wikipedia navigation, infoboxes, references, and other page chrome are left out of the reading queue. Text and audio stay on this machine.
+The repository includes a small Manifest V3 extension in `extension/`. Click its toolbar button on any readable page and it opens an in-page Sonora panel: article text blocks, table cells, and headings on the page become clickable, with Heart or Bella voice selection, a 0.75×–3× speed control, passage progress, and background rendering of the next passage. Wikipedia navigation, infoboxes, references, and other page chrome are left out of the reading queue. Text and audio stay on this machine.
 
 1. Start Sonora with `npm start` and wait for the local voice chip to say **local voice ready**.
 2. Open `brave://extensions` or `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the repository's `extension/` directory.

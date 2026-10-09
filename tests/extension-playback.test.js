@@ -23,6 +23,17 @@ test('2x Web Audio tempo halves duration while preserving pitch and channel alig
   for (let i = 0; i < output[0].length; i++) assert.equal(output[0][i] + output[1][i], 0);
 });
 
+test('speeds through 3x shorten audio without raising its pitch', () => {
+  const input = tone(220, 3);
+  for (const rate of [2.25, 2.5, 2.75, 3]) {
+    const output = stretch([input], 24000, rate)[0];
+    assert.equal(output.length, Math.round(input.length / rate));
+    assert(Math.abs(frequency(output, 24000) - 220) < 3, `${rate}x changed the pitch`);
+    assert(output.every(Number.isFinite));
+  }
+  assert.throws(() => stretch([input], 24000, 3.1), /Invalid playback speed/);
+});
+
 test('slower tempo retains pitch, silence remains finite, and 1x leaves samples intact', () => {
   const input = tone(330, 2);
   const output = stretch([input], 24000, 0.75)[0];
