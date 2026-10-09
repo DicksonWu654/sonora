@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.3.2';
+  const OVERLAY_VERSION = '0.4.0';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -30,6 +30,7 @@
       .panel, button, select { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       .panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; color: #eff2ec; background: #121815f7; border: 1px solid #354239; border-radius: 12px; box-shadow: 0 18px 70px #000b, 0 2px 12px #0008; backdrop-filter: blur(18px); }
       .panel.is-hidden { display: none; }
+      .word-mark { position: fixed; z-index: 2147483646; pointer-events: none; border-radius: 2px; background: rgba(239, 201, 135, .65); box-shadow: inset 0 -2px #b27635; }
       .top { display: flex; align-items: center; gap: 10px; padding: 15px 16px 13px; border-bottom: 1px solid #2d3930; }
       .mark { color: #d8b28b; font-size: 19px; transform: rotate(-45deg); }
       .brand { font-size: 14px; font-weight: 700; letter-spacing: -.035em; }
@@ -127,6 +128,8 @@
     if (sourceUrl !== location.href) scheduleBlockRefresh();
   }, 1000);
   const knownBlocks = new Set();
+  const wordTracker = window.SonoraWords.createTracker(document, shadow);
+  let wordFrame = null;
   const changedSettings = new Set();
   const pageClass = PAGE_CLASS;
   const currentClass = CURRENT_CLASS;
@@ -176,6 +179,29 @@
   function clearCurrentBlock() {
     blockEntries.forEach(entry => (entry.nodes || [entry.node]).forEach(node => node.classList.remove(currentClass)));
   }
+  function currentEntry() {
+    const item = state.queue[state.index];
+    return item && blockEntries.find(entry => item.blockKey ? entry.key === item.blockKey : entry.index === item.blockIndex);
+  }
+  function paintCurrentWord() {
+    const position = state.webAudioBuffer ? webAudioPosition() : els.audio.currentTime;
+    wordTracker.update(currentEntry(), position, isGoogleDocsPage() ? googleDocsSurface(source.root) : null);
+  }
+  function stopWordFrames() {
+    if (wordFrame !== null) cancelAnimationFrame(wordFrame);
+    wordFrame = null;
+  }
+  function startWordFrames() {
+    stopWordFrames();
+    const tick = () => {
+      wordFrame = null;
+      if (state.closed || !state.playing) return;
+      paintCurrentWord();
+      wordFrame = requestAnimationFrame(tick);
+    };
+    wordFrame = requestAnimationFrame(tick);
+  }
+  function resetWords() { stopWordFrames(); wordTracker.reset(); }
   function markCurrentBlock(blockIndex, blockKey) {
     clearCurrentBlock();
     const entry = blockEntries.find(candidate => blockKey ? candidate.key === blockKey : candidate.index === blockIndex);
@@ -308,6 +334,7 @@
     return true;
   }
   function pausePlayback() {
+    stopWordFrames();
     pauseWebAudio();
     els.audio.pause();
     if (state.pendingRender) {
@@ -317,6 +344,7 @@
       state.pendingRender = false;
     }
     state.playing = false;
+    if (state.index >= 0 && !state.completed) paintCurrentWord();
     updateTransport();
   }
   function pageAudioSource(source) {
@@ -338,7 +366,9 @@
     for (const entry of blockEntries) {
       if (entry.index < blockIndex || remaining <= 0) continue;
       const blockText = entry.text.slice(0, remaining);
-      chunksFor(blockText, 1200).forEach(chunk => queue.push({ text: chunk, blockIndex: entry.index, blockKey: entry.key }));
+      const chunks = chunksFor(blockText, 1200);
+      const offsets = window.SonoraWords.chunkOffsets(blockText, chunks);
+      chunks.forEach((chunk, at) => queue.push({ text: chunk, blockIndex: entry.index, blockKey: entry.key, blockOffset: offsets[at] }));
       remaining -= blockText.length;
     }
     if (!queue.length && blockIndex === 0 && pageText && !isGoogleDocsPage()) {
@@ -368,6 +398,7 @@
     state.completed = false;
     state.playing = false;
     state.pendingRender = true;
+    resetWords();
     els.audio.pause();
     resetWebAudio();
     releaseAudioObjectUrl();
@@ -384,6 +415,7 @@
       if (!result || typeof result.src !== 'string' || !result.src) {
         throw new Error('Sonora returned no playable audio.');
       }
+      wordTracker.prepare(currentEntry(), item, result.words);
       els.audio.pause();
       releaseAudioObjectUrl();
       resetWebAudio();
@@ -412,6 +444,7 @@
       if (revision !== state.revision) return;
       state.pendingRender = false;
       state.playing = true;
+      startWordFrames();
       setStatus(`Playing passage ${index + 1} of ${state.queue.length}`, 'ready');
       updateTransport();
       if (index + 1 < state.queue.length) render(index + 1).catch(() => {});
@@ -439,6 +472,7 @@
     state.pendingRender = false;
     state.completed = false;
     state.pendingStart = 0;
+    resetWords();
     els.audio.pause();
     resetWebAudio();
     releaseAudioObjectUrl();
@@ -456,6 +490,7 @@
     }
   }
   function stop() {
+    resetWords();
     state.revision++;
     state.pendingStart = null;
     state.pendingRender = false;
@@ -534,6 +569,7 @@
       state.index = -1;
       state.completed = false;
       state.queue = [];
+      resetWords();
       state.rendered.clear();
       els.audio.pause();
       resetWebAudio();
@@ -572,6 +608,7 @@
     if (!changed && state.index >= 0) {
       const item = state.queue[state.index];
       markCurrentBlock(item?.blockIndex, item?.blockKey);
+      if (!state.completed) paintCurrentWord();
     }
     const updatedText = cleanText(nextEntries.map(entry => entry.text).join('\n\n'));
     pageText = (updatedText || cleanText(source.text)).slice(0, MAX_PAGE_CHARS);
@@ -633,6 +670,9 @@
     docsHover?.nodes.forEach(node => node.classList.add('sonora-hover-block'));
   };
   document.addEventListener('pointermove', docsPointerListener, true);
+  const wordPositionListener = () => { if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord(); };
+  document.addEventListener('scroll', wordPositionListener, true);
+  window.addEventListener('resize', wordPositionListener);
   window.addEventListener('popstate', scheduleBlockRefresh);
   window.addEventListener('hashchange', scheduleBlockRefresh);
   const pageObserver = new MutationObserver(scheduleBlockRefresh);
@@ -672,6 +712,7 @@
       playWebAudio(state.webAudioSourceData, revision, state.webAudioOffset).then(started => {
         if (!started || revision !== state.revision || state.closed) return;
         state.playing = true;
+        startWordFrames();
         updateTransport();
         setStatus(`Playing passage ${state.index + 1} of ${state.queue.length}`, 'ready');
       }).catch(error => {
@@ -682,6 +723,7 @@
       els.audio.play().then(() => {
         if (revision !== state.revision || state.closed) return;
         state.playing = true;
+        startWordFrames();
         updateTransport();
         setStatus(`Playing passage ${state.index + 1} of ${state.queue.length}`, 'ready');
       }).catch(error => {
@@ -715,6 +757,7 @@
     else {
       state.pendingRender = false;
       state.completed = true;
+      resetWords();
       els.track.style.width = '100%';
       updateTransport();
       setStatus('Page section complete — click another block to jump.', 'ready');
@@ -747,6 +790,7 @@
   });
   els.minimize.addEventListener('click', () => els.panel.classList.toggle('is-hidden'));
   els.close.addEventListener('click', () => {
+    resetWords();
     state.closed = true;
     state.revision++;
     els.audio.pause();
@@ -758,6 +802,8 @@
     document.removeEventListener('click', pageClickListener, true);
     document.removeEventListener('pointerdown', docsPointerDownListener, true);
     document.removeEventListener('pointermove', docsPointerListener, true);
+    document.removeEventListener('scroll', wordPositionListener, true);
+    window.removeEventListener('resize', wordPositionListener);
     window.removeEventListener('popstate', scheduleBlockRefresh);
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);

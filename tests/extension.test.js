@@ -13,7 +13,7 @@ test('the unpacked extension has a complete Manifest V3 package', () => {
   assert.equal(manifest.background.service_worker, 'background.js');
   const overlay = fs.readFileSync(path.join(extension, 'overlay.js'), 'utf8');
   assert.match(overlay, new RegExp(`OVERLAY_VERSION = '${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
-  for (const file of ['background.js', 'overlay.js', 'page.css', 'reader.html', 'reader.css', 'reader.js', 'text.js', 'validation.js', 'tempo.js', 'docs.js', 'docs-init.js']) {
+  for (const file of ['background.js', 'overlay.js', 'page.css', 'reader.html', 'reader.css', 'reader.js', 'text.js', 'validation.js', 'tempo.js', 'docs.js', 'docs-init.js', 'words.js']) {
     assert(fs.existsSync(path.join(extension, file)), `${file} is missing from the extension`);
   }
   assert.deepEqual(fs.readFileSync(path.join(extension, 'text.js')), fs.readFileSync(path.join(root, 'public', 'text.js')));

@@ -69,6 +69,7 @@ No Chrome Web Store account or browser restart is needed. Sonora is currently di
 Open a normal web page, click Sonora's toolbar icon, and wait for **Ready — click page text to begin**. Click a paragraph, heading, or table cell directly on the page. It reads from there through the remaining discovered passages.
 
 - Click another passage to jump there.
+- Follow the amber highlight as it moves through each spoken word on the page, including in Google Docs. Pausing freezes it; resuming or changing speed keeps it in step with the audio.
 - Use the floating panel to pause/resume, change voice, or choose 0.75×–3× speed.
 - Minimize the panel to keep it out of the way; click Sonora's toolbar icon to show it again.
 - Close the panel to stop reading and remove the page highlights.

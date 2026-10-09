@@ -1,6 +1,6 @@
 # Sonora
 
-Click text on a web page and hear it read aloud with a natural, local voice. Sonora works in **Brave and Chrome**, including Google Docs paragraphs and tables. Pause, switch voices, jump to another passage, or listen at **0.75×–3× without changing the voice's pitch**.
+Click text on a web page and hear it read aloud with a natural, local voice. Sonora works in **Brave and Chrome**, including Google Docs paragraphs and tables, and highlights each spoken word directly on the page. Pause, switch voices, jump to another passage, or listen at **0.75×–3× without changing the voice's pitch**.
 
 Speech runs on your computer with Kokoro 82M. There is no subscription, API key, or cloud speech service. You can also turn PDF, EPUB, TXT, and Markdown books into downloadable MP3s and a private podcast feed.
 
@@ -70,6 +70,8 @@ The repository includes a small Manifest V3 extension in `extension/`. Click its
 Brave supports Chrome Manifest V3 extensions, so the same unpacked extension works in both browsers. Text is split into passages under the local model's request limit; the next passage is rendered while the current one plays. The extension does not call a cloud speech API.
 
 The current local engine is Kokoro 82M, which is already a compact neural voice. The extension's speed control preserves voice pitch and changes playback without asking the model to synthesize a second copy at each speed. CPU and CUDA setup options remain the same as the book reader; use `npm run voice:setup:gpu` when CUDA is available for lower first-passage latency.
+
+An amber highlight follows the current word using the voice model's word timings. It stays synchronized with playback speed, freezes when paused, and clears when you stop or close the reader. Regular page text uses the browser's text highlight API; Google Docs uses positioned marks over its painted words. Page text remains editable and links keep their original markup. Passages without usable timings or matching text retain the passage highlight.
 
 Google Docs paragraphs and table entries use the document's positioned canvas annotations for clicking and highlighting. After installing or reloading Sonora, refresh an already open Google Doc once so Docs enables those annotations at startup. Sonora keeps the reading queue while Docs recycles its canvas tiles during scrolling, and adds newly discovered pages after the queued passages. Clicking again uses the latest discovered text. Switching document tabs selects the active tab's passages; sharing controls and the document toolbar are excluded.
 

@@ -2,6 +2,12 @@
   cursor: pointer !important;
 }
 
+::highlight(sonora-current-word) {
+  background-color: #efc987;
+  color: #241c12;
+  text-decoration: underline;
+}
+
 :where(.sonora-readable-block):hover {
   outline: 2px solid rgba(216, 178, 139, .72) !important;
   outline-offset: 3px !important;
