@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install check tools and ebook extraction dependencies
+        run: python -m pip install uv==0.9.27 beautifulsoup4==4.13.4 pypdf==5.4.0
+      - name: Verify the voice dependencies resolve for a fresh installation
+        run: |
+          uv venv --python python .venv/voice-check
+          uv pip install --dry-run --python .venv/voice-check/bin/python --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r tools/narration/requirements.lock
+      - name: Test extension, launcher, extraction, conversion checkpoints, and RSS
+        run: NARRATION_PYTHON="$(command -v python)" npm test
+      - name: Verify public release packaging
+        run: npm run release:zip

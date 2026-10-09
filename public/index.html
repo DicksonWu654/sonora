@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111513">
+  <title>Voxleaf — books, in a better voice</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a href="#" class="wordmark" aria-label="Voxleaf home"><span class="wordmark-mark">◒</span><span>voxleaf</span></a>
+      <div class="topbar-context" id="topbar-context">Local listening studio</div>
+      <div class="topbar-actions">
+        <span class="engine-chip" id="engine-chip"><i></i><span>checking voice</span></span>
+        <button class="text-button" id="reset-btn" type="button" hidden>Import another</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="landing" id="landing-view">
+        <div class="landing-copy">
+          <p class="eyebrow"><span class="eyebrow-line"></span> A private reading room</p>
+          <h1>Give your books<br><em>a better voice.</em></h1>
+          <p class="lede">Drop in a PDF, EPUB, or text file. Voxleaf turns it into a calm, natural listening session on your device.</p>
+          <div class="landing-actions">
+            <label class="primary-button" for="book-input">Choose a book <span>↗</span></label>
+            <button class="secondary-button" id="sample-btn" type="button"><span class="book-glyph">▤</span> Try Moby-Dick</button>
+          </div>
+          <p class="privacy-note"><span class="lock-glyph">⌁</span> Books and synthetic narration stay on your studio server. Your podcast feed uses a private link.</p>
+        </div>
+        <div class="landing-art" aria-hidden="true">
+          <div class="orb orb-back"></div>
+          <div class="orb orb-main"><div class="orb-inner"></div></div>
+          <div class="sound-wave wave-one"></div><div class="sound-wave wave-two"></div><div class="sound-wave wave-three"></div>
+          <div class="art-label art-label-top">READ / LISTEN</div>
+          <div class="art-label art-label-bottom">01 — LOCAL VOICE</div>
+          <div class="art-spine"></div>
+        </div>
+        <div class="supported-types"><span>Works with</span><b>PDF</b><b>EPUB</b><b>TXT</b><b>MD</b><span class="supported-tail">— DRM-free Kindle books via EPUB export</span></div>
+      </section>
+
+      <section class="reader-view" id="reader-view" hidden>
+        <aside class="chapter-rail" aria-label="Book chapters">
+          <div class="rail-label">YOUR BOOK</div>
+          <h2 id="book-title">Untitled book</h2>
+          <p class="book-meta" id="book-meta">0 chapters · 0 min read</p>
+          <div class="chapter-list" id="chapter-list"></div>
+          <button class="rail-import" id="rail-import" type="button">＋ Add another book</button>
+        </aside>
+        <section class="reader-main">
+          <div class="reader-heading">
+            <div>
+              <p class="eyebrow"><span class="eyebrow-line"></span> Now reading</p>
+              <h1 id="chapter-title">Chapter one</h1>
+              <p class="chapter-subtitle" id="chapter-subtitle"></p>
+            </div>
+            <div class="progress-copy" id="progress-copy">1 / 1</div>
+          </div>
+          <div class="reading-progress"><i id="reading-progress-bar"></i></div>
+          <article class="book-text" id="book-text" tabindex="0" aria-label="Book text"></article>
+        </section>
+        <aside class="listen-rail" aria-label="Listening controls">
+          <div class="listen-label">LISTENING ROOM</div>
+          <div class="voice-orb" id="voice-orb"><span class="voice-orb-core"></span><span class="voice-orb-ring ring-a"></span><span class="voice-orb-ring ring-b"></span></div>
+          <p class="voice-state" id="voice-state">Ready when you are</p>
+          <p class="voice-detail" id="voice-detail">Choose a chapter to begin</p>
+          <div class="voice-select-wrap"><label for="voice-select">Voice</label><select id="voice-select"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option><option value="browser">Browser voice</option></select></div>
+          <button class="listen-button" id="listen-btn" type="button"><span class="play-icon">▶</span><span>Listen to chapter</span></button>
+          <div class="export-actions">
+            <button class="secondary-button" id="preview-btn" type="button">Make short preview</button>
+            <button class="listen-button" id="export-btn" type="button">Convert full book to MP3</button>
+            <p class="tip">Conversion keeps running when you close this page. Completed MP3s appear in your podcast feed.</p>
+          </div>
+          <audio id="audio" preload="auto"></audio>
+          <div class="listen-rule"></div>
+          <p class="tip"><span>TIP</span> You can keep reading while the voice plays. Click any paragraph to start there.</p>
+        </aside>
+      </section>
+      <section class="library" id="library" aria-label="Conversions and podcast feed">
+        <div class="library-heading"><div><p class="eyebrow">YOUR AUDIOBOOKS</p><h2>MP3s &amp; podcast feed</h2></div><button class="secondary-button" id="copy-feed" type="button">Copy private RSS URL</button></div>
+        <input id="feed-url" readonly aria-label="Private podcast RSS URL" hidden>
+        <p class="tip" id="empty-library">Import a book, then make a short preview or convert it to MP3. Add your private RSS URL in your podcast app.</p>
+        <div id="job-list" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <footer class="footer"><span>VOXLEAF / 2026</span><span>LOCAL-FIRST AUDIOBOOKS</span></footer>
+    <input id="book-input" type="file" accept=".txt,.md,.pdf,.epub,text/plain,application/pdf,application/epub+zip" hidden>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+  <script src="text.js"></script>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

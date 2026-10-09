@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Sonora — read page aloud",
+  "version": "0.3.1",
+  "description": "Click article text on any page to read it aloud with your local Sonora/Kokoro voice.",
+  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://docs.google.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://docs.google.com/document/*"],
+      "css": ["page.css"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://docs.google.com/document/*"],
+      "js": ["docs-init.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Sonora reader"
+  }
+}

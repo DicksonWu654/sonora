@@ -1,0 +1,37 @@
+:where(.sonora-readable-block) {
+  cursor: pointer !important;
+}
+
+:where(.sonora-readable-block):hover {
+  outline: 2px solid rgba(216, 178, 139, .72) !important;
+  outline-offset: 3px !important;
+  border-radius: 3px !important;
+}
+
+:where(.sonora-current-block) {
+  outline: 2px solid rgba(216, 178, 139, .95) !important;
+  outline-offset: 3px !important;
+  border-radius: 3px !important;
+  background-color: rgba(216, 178, 139, .11) !important;
+}
+
+/* Google Docs paints the words on canvas. Its SVG annotations have the exact
+   line positions, so highlight those rectangles without outlining the canvas. */
+:where(.sonora-docs-passage),
+:where(.sonora-docs-passage):hover {
+  outline: none !important;
+  background: none !important;
+}
+
+.sonora-docs-passage rect[aria-label] {
+  pointer-events: all !important;
+  cursor: pointer !important;
+}
+
+.sonora-docs-passage.sonora-hover-block rect[aria-label],
+.sonora-docs-passage.sonora-current-block rect[aria-label] {
+  opacity: 1 !important;
+  fill: rgba(216, 178, 139, .18) !important;
+  stroke: rgba(216, 178, 139, .8) !important;
+  stroke-width: 1.5px !important;
+}

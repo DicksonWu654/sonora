@@ -1,0 +1,6 @@
+- `public/` is the existing reader; `tools/books/` owns durable conversion and RSS.
+- Kokoro assets live outside Git in `~/.cache/sonora`; `.runtime/` contains private book text, credentials, job checkpoints, and MP3s. Never commit it or print its credentials in logs.
+- The HTTP server binds to loopback. Tunnel access to the studio requires its private session link; podcast clients use a separate secret feed URL.
+- Keep chunking shared between the browser and server in `public/text.js`. Conversions must checkpoint on disk and continue without an open browser.
+- Check EPUB metadata and spine against the requested title; filenames can mislabel omnibus archives. Extract only the requested volume before narration.
+- Run `npm test` and a short real Kokoro conversion for changes to narration or assembly. Do not narrate a whole book just to test.

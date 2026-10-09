@@ -1,0 +1,17 @@
+{
+  "name": "book-to-voice",
+  "version": "0.3.1",
+  "private": true,
+  "description": "A local-first book reader with natural neural narration.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "launch": "node tools/launch.js",
+    "start": "node server.js",
+    "voice:setup": "node tools/narration/setup.js",
+    "voice:setup:gpu": "node tools/narration/setup-gpu.js",
+    "test": "node --test tests/*.test.js",
+    "release:zip": "node tools/release.js",
+    "convert": "node tools/books/convert.js",
+    "tunnel": "node tools/books/tunnel.js"
+  }
+}
