@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.1';
+  const OVERLAY_VERSION = '0.4.2';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -131,11 +131,13 @@
   }, 1000);
   const knownBlocks = new Set();
   const wordTracker = window.SonoraWords.createTracker(document, shadow);
+  const codeRange = window.SonoraWords.createRangeResolver(document);
   let wordFrame = null;
   const changedSettings = new Set();
   const pageClass = PAGE_CLASS;
   const currentClass = CURRENT_CLASS;
   let docsHover = null;
+  let codeHoverPoint = null;
   els.audio.preservesPitch = true;
 
   els.title.textContent = source.title || document.title || 'Untitled page';
@@ -180,6 +182,38 @@
   }
   function clearCurrentBlock() {
     blockEntries.forEach(entry => (entry.nodes || [entry.node]).forEach(node => node.classList.remove(currentClass)));
+    window.CSS?.highlights?.delete('sonora-current-code');
+  }
+  function markCodePart(entry, part, name) {
+    const highlights = window.CSS?.highlights;
+    if (!highlights || !window.Highlight) return;
+    const range = part && codeRange(entry, part.offset, part.text.length);
+    if (range) {
+      const highlight = new Highlight(range);
+      highlight.priority = name === 'sonora-current-code' ? 1 : 0;
+      highlights.set(name, highlight);
+    } else highlights.delete(name);
+  }
+  function codePartAt(entry, x, y) {
+    const bounds = entry.contentNode.getBoundingClientRect();
+    if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
+    let nearest = null, distance = Infinity;
+    for (const part of entry.parts) {
+      const range = codeRange(entry, part.offset, part.text.length);
+      for (const rect of range?.getClientRects() || []) {
+        if (rect.width <= 0 || rect.height <= 0 || y < rect.top || y > rect.bottom) continue;
+        const gap = Math.max(rect.left - x, x - rect.right, 0);
+        if (!gap) return part;
+        if (gap < distance) { nearest = part; distance = gap; }
+      }
+    }
+    return nearest;
+  }
+  function updateCodeHover() {
+    const point = codeHoverPoint;
+    const block = point && document.elementFromPoint(point.x, point.y)?.closest('.sonora-code-block');
+    const entry = block && blockEntries.find(candidate => candidate.node === block);
+    markCodePart(entry, entry && codePartAt(entry, point.x, point.y), 'sonora-hover-code');
   }
   function currentEntry() {
     const item = state.queue[state.index];
@@ -208,6 +242,8 @@
     clearCurrentBlock();
     const entry = blockEntries.find(candidate => blockKey ? candidate.key === blockKey : candidate.index === blockIndex);
     if (entry) (entry.nodes || [entry.node]).forEach(node => node.classList.add(currentClass));
+    const item = state.queue[state.index];
+    if (entry?.kind === 'code' && item) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
   }
   function updateTransport() {
     els.playIcon.textContent = state.playing ? 'Ⅱ' : '▶';
@@ -362,15 +398,18 @@
     state.audioObjectUrl = objectUrl;
     return objectUrl;
   }
-  function queueFrom(blockIndex = 0, limit = MAX_PAGE_CHARS) {
+  function queueFrom(blockIndex = 0, limit = MAX_PAGE_CHARS, blockOffset = 0) {
     const queue = [];
     let remaining = limit;
     for (const entry of blockEntries) {
       if (entry.index < blockIndex || remaining <= 0) continue;
       const blockText = entry.text.slice(0, remaining);
-      const chunks = chunksFor(blockText, 1200);
-      const offsets = window.SonoraWords.chunkOffsets(blockText, chunks);
-      chunks.forEach((chunk, at) => queue.push({ text: chunk, blockIndex: entry.index, blockKey: entry.key, blockOffset: offsets[at] }));
+      const pieces = entry.kind === 'code' ? null : chunksFor(blockText, 1200);
+      const offsets = pieces && window.SonoraWords.chunkOffsets(blockText, pieces);
+      const chunks = entry.kind === 'code' ? window.SonoraPassages.codePassages(blockText, chunksFor)
+        : pieces.map((text, at) => ({ text, offset: offsets[at] }));
+      chunks.filter(part => entry.index !== blockIndex || part.offset >= blockOffset)
+        .forEach(part => queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset }));
       remaining -= blockText.length;
     }
     if (!queue.length && blockIndex === 0 && pageText && !isGoogleDocsPage()) {
@@ -458,8 +497,8 @@
       setStatus(error.name === 'NotAllowedError' ? 'Audio is ready. Press play to start.' : error.message, 'error');
     }
   }
-  function startQueue(blockIndex = 0) {
-    const queue = queueFrom(blockIndex);
+  function startQueue(blockIndex = 0, blockOffset = 0) {
+    const queue = queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset);
     if (!queue.length) {
       setStatus(isGoogleDocsPage() ? readyMessage() : 'No readable text was found in that block.', 'error');
       return;
@@ -549,11 +588,13 @@
     }
     const entry = blockEntries.find(candidate => candidate.node === block || candidate.nodes?.includes(block));
     if (!entry) return;
+    const part = entry.kind === 'code' && event.detail !== 0 ? codePartAt(entry, event.clientX, event.clientY) : null;
+    if (entry.kind === 'code' && event.detail !== 0 && !part) return;
     if (isGoogleDocsPage()) {
       event.preventDefault();
       event.stopPropagation();
     }
-    startQueue(entry.index);
+    startQueue(entry.index, part?.offset || 0);
   }
   function updateBlocks(nextBlocks, navigated = false) {
     const nextEntries = makeBlockEntries(nextBlocks);
@@ -586,16 +627,18 @@
     const nextNodes = new Set(nextEntries.flatMap(entry => entry.nodes || [entry.node]));
     knownBlocks.forEach(node => {
       if (!nextNodes.has(node)) {
-        node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block');
+        node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block');
         knownBlocks.delete(node);
       }
     });
     nextEntries.forEach(entry => (entry.nodes || [entry.node]).forEach(node => {
       node.classList.add(pageClass);
+      node.classList.toggle('sonora-code-block', entry.kind === 'code');
       if (isGoogleDocsPage()) node.classList.add('sonora-docs-passage');
       knownBlocks.add(node);
     }));
     blockEntries = nextEntries;
+    if (!isGoogleDocsPage()) updateCodeHover();
     if (!changed && isGoogleDocsPage() && state.queue.length) {
       // Continue through newly rendered pages after the queued snapshot. Keys
       // survive tile replacement and index shifts from earlier discoveries.
@@ -666,7 +709,11 @@
   };
   document.addEventListener('pointerdown', docsPointerDownListener, true);
   const docsPointerListener = event => {
-    if (!isGoogleDocsPage()) return;
+    if (!isGoogleDocsPage()) {
+      codeHoverPoint = { x: event.clientX, y: event.clientY };
+      updateCodeHover();
+      return;
+    }
     const surface = googleDocsSurface(source.root);
     const next = surface?.closest('.kix-appview-editor')?.contains(event.target) ? window.SonoraDocs.hitTest(blockEntries, event.clientX, event.clientY) : null;
     if (docsHover === next) return;
@@ -675,7 +722,10 @@
     docsHover?.nodes.forEach(node => node.classList.add('sonora-hover-block'));
   };
   document.addEventListener('pointermove', docsPointerListener, true);
-  const wordPositionListener = () => { if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord(); };
+  const wordPositionListener = () => {
+    if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord();
+    if (!isGoogleDocsPage()) updateCodeHover();
+  };
   document.addEventListener('scroll', wordPositionListener, true);
   window.addEventListener('resize', wordPositionListener);
   window.addEventListener('popstate', scheduleBlockRefresh);
@@ -814,7 +864,8 @@
     if (refreshTimer) clearTimeout(refreshTimer);
     clearInterval(navigationTimer);
     if (state.voiceTimer) clearTimeout(state.voiceTimer);
-    knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block'));
+    knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block'));
+    window.CSS?.highlights?.delete('sonora-hover-code');
     clearCurrentBlock();
     root.remove();
     delete window.__sonoraOverlay;
@@ -829,6 +880,7 @@
 
   function readableText(node) {
     if (!node) return '';
+    if (node.matches?.('pre')) node = node.querySelector('code') || node;
     if (isGoogleDocsPage() && node.matches?.('g[role="paragraph"]')) {
       return cleanText([...node.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '));
     }
@@ -852,8 +904,13 @@
       docsEntries = window.SonoraDocs.mergePassages(docsEntries, window.SonoraDocs.passages(surface, cleanText), cleanText);
       return docsEntries;
     }
-    const incoming = nodes.map(node => ({ node, text: readableText(node), scope: window.SonoraPassages.scopeFor(node) }))
-      .filter(entry => entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
+    const incoming = nodes.map(node => {
+      const text = readableText(node);
+      return { node, text, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
+        ? { kind: 'code', contentNode: node.querySelector('code') || node, parts: window.SonoraPassages.codePassages(text, chunksFor) } : {}) };
+    })
+      .filter(entry => entry.kind === 'code' ? entry.parts.length > 0
+        : entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
     pageEntries = reconcileEntries(pageEntries, incoming);
     return pageEntries;
   }
@@ -888,8 +945,11 @@
     const raw = [...new Set([...semantic, ...googleBlocks, ...custom])];
     const blocks = raw.filter(block => {
       if (block.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(block)) return false;
+      if (window.SonoraPassages.isCodeChrome(block, root)) return false;
+      if (!block.matches('pre') && block.closest('pre')) return false;
       const value = readableText(block);
-      if (value.length <= (block.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1)) return false;
+      if (value.length <= (block.matches('pre, td, th, [role="cell"], [role="gridcell"]') ? 0 : 1)) return false;
+      if (block.matches('pre') && !/[\p{L}\p{N}]/u.test(value)) return false;
       if (block.matches('.kix-page') && (googleParagraphs.length || googleLines.length || googleLineContent.length)) return false;
       if (block.matches('.kix-lineview') && block.closest('.kix-paragraphrenderer')) return false;
       if (block.matches('.kix-lineview-content') && block.closest('.kix-lineview')) return false;
@@ -903,7 +963,8 @@
       ? root
       : root.querySelector?.('[contenteditable="true"]');
     const generic = [...root.querySelectorAll('div, section')].filter(node => {
-      if (node.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(node)) return false;
+      if (node.closest(noiseSelector) || node.closest('pre') || !window.SonoraPassages.visibleBlock(node)) return false;
+      if (window.SonoraPassages.isCodeChrome(node, root)) return false;
       const value = readableText(node);
       const directText = cleanText([...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.nodeValue).join(' '));
       return value.length > 1 && directText.length > 1 && !node.querySelector(semanticSelector);

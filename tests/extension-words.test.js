@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { compactMap, compactSpan, chunkOffsets, wordAt, domRange, docsRects, createTracker } = require('../extension/words');
+const { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, createTracker } = require('../extension/words');
 
 test('word offsets map normalized ligatures, combining accents and emoji back to original UTF-16', () => {
   const map = compactMap('  oﬃce\u200b cafe\u0301 😀  ');
@@ -142,8 +142,39 @@ function domTrackerFixture() {
     node.textNodes = [{ data: text, isConnected: true, parentElement: { closest: () => null } }];
     return node;
   };
-  return { tracker: createTracker(document, {}), highlights, makeNode };
+  return { tracker: createTracker(document, {}), highlights, makeNode, document };
 }
+
+test('code ranges select the clicked copy across repeated lines, indentation, and DOM redraws', () => {
+  const { document, makeNode } = domTrackerFixture(), resolve = createRangeResolver(document);
+  const text = 'call();\ncall();', node = makeNode('call();\n    call();');
+  const entry = { node, text };
+  let range = resolve(entry, 8, 7);
+  assert.equal(range.startOffset, 12);
+  assert.equal(range.endOffset, 19);
+  node.textNodes[0].isConnected = false;
+  const replacement = makeNode('call();\n  call();');
+  node.textNodes = replacement.textNodes;
+  range = resolve(entry, 8, 7);
+  assert.equal(range.startContainer, replacement.textNodes[0]);
+  assert.equal(range.startOffset, 10);
+  assert.equal(resolve(entry, -1, 5), null);
+  node.isConnected = false;
+  assert.equal(resolve(entry, 8, 7), null);
+});
+
+test('code ranges and spoken words exclude code-language headers by using the code content node', () => {
+  const { document, tracker, highlights, makeNode } = domTrackerFixture();
+  const entry = { node: makeNode('javascript\nconst answer = 42;'), contentNode: makeNode('const answer = 42;'), text: 'const answer = 42;' };
+  const range = createRangeResolver(document)(entry, 0, entry.text.length);
+  assert.equal(range.startContainer, entry.contentNode.textNodes[0]);
+  tracker.prepare(entry, { text: entry.text, blockOffset: 0 }, [{ start: 0, end: 1, textOffset: 6, length: 6 }]);
+  tracker.update(entry, .2, null);
+  const word = [...highlights.get('sonora-current-word')][0];
+  assert.equal(word.startContainer, entry.contentNode.textNodes[0]);
+  assert.equal(word.startOffset, 6);
+  assert.equal(highlights.get('sonora-current-word').priority, 2);
+});
 
 test('word highlight reattaches after React replaces text nodes during the same spoken word', () => {
   const { tracker, highlights, makeNode } = domTrackerFixture();

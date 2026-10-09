@@ -30,10 +30,21 @@
 
   function compactSpan(map, start, length) {
     if (!Number.isInteger(start) || !Number.isInteger(length) || start < 0 || length <= 0) return null;
-    const first = map.positions.findIndex(position => position.end > start);
-    if (first < 0 || map.positions[first].start >= start + length) return null;
-    let end = first;
-    while (end < map.positions.length && map.positions[end].start < start + length) end++;
+    let low = 0, high = map.positions.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (map.positions[middle].end <= start) low = middle + 1;
+      else high = middle;
+    }
+    const first = low;
+    if (!map.positions[first] || map.positions[first].start >= start + length) return null;
+    high = map.positions.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (map.positions[middle].start < start + length) low = middle + 1;
+      else high = middle;
+    }
+    const end = low;
     return { start: first, end };
   }
 
@@ -89,6 +100,22 @@
       range.setEnd(last.node, end - last.start);
       return range;
     } catch { return null; } // The page can replace text while an audio frame runs.
+  }
+
+  function createRangeResolver(document) {
+    const cache = new WeakMap();
+    return (entry, start, length) => {
+      const node = entry?.contentNode || entry?.node;
+      if (!node?.isConnected) return null;
+      let saved = cache.get(node);
+      if (!saved || saved.text !== entry.text || saved.index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value)) {
+        const index = domIndex(node, document), source = compactMap(entry.text);
+        saved = { text: entry.text, index, source, base: index.text.indexOf(source.text) };
+        cache.set(node, saved);
+      }
+      const span = compactSpan(saved.source, start, length);
+      return span && saved.base >= 0 ? domRange(saved.index, { start: saved.base + span.start, end: saved.base + span.end }, document) : null;
+    };
   }
 
   function docsRects(entry, span, surface, context) {
@@ -173,8 +200,8 @@
       sourceCompact = source.text;
       spans = words.map(word => compactSpan(source, item.blockOffset + word.textOffset, word.length));
       if (!entry.rects && entry.node?.isConnected) {
-        index = domIndex(entry.node, document);
-        indexedNode = entry.node;
+        index = domIndex(entry.contentNode || entry.node, document);
+        indexedNode = entry.contentNode || entry.node;
         sourceBase = index.text.indexOf(source.text);
       }
     }
@@ -189,9 +216,9 @@
         index = null;
         current = -1;
       }
-      if (!entry.rects && entry.node?.isConnected && (!index || entry.node !== indexedNode || index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value))) {
-        index = domIndex(entry.node, document);
-        indexedNode = entry.node;
+      if (!entry.rects && entry.node?.isConnected && (!index || (entry.contentNode || entry.node) !== indexedNode || index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value))) {
+        index = domIndex(entry.contentNode || entry.node, document);
+        indexedNode = entry.contentNode || entry.node;
         sourceBase = index.text.indexOf(sourceCompact);
         current = -1;
       }
@@ -206,15 +233,18 @@
         const range = domRange(index, { start: sourceBase + span.start, end: sourceBase + span.end }, document);
         if (!range) { clearPaint(); return; }
         current = next;
-        if (registry && Highlight) registry.set(highlightName, new Highlight(range));
-        else paintBoxes([...range.getClientRects()], { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
+        if (registry && Highlight) {
+          const highlight = new Highlight(range);
+          highlight.priority = 2;
+          registry.set(highlightName, highlight);
+        } else paintBoxes([...range.getClientRects()], { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
       }
     }
     function reset() { clearPaint(); words = []; spans = []; item = index = indexedNode = null; sourceText = sourceCompact = ''; sourceBase = -1; }
     return { prepare, update, reset };
   }
 
-  const api = { compactMap, compactSpan, chunkOffsets, wordAt, domRange, docsRects, createTracker };
+  const api = { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, createTracker };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraWords = api;
 })(globalThis);

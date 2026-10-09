@@ -8,6 +8,14 @@
   text-decoration: underline;
 }
 
+::highlight(sonora-hover-code) {
+  background-color: rgba(216, 178, 139, .18);
+}
+
+::highlight(sonora-current-code) {
+  background-color: rgba(216, 178, 139, .32);
+}
+
 :where(.sonora-readable-block):hover {
   outline: 2px solid rgba(216, 178, 139, .72) !important;
   outline-offset: 3px !important;
@@ -19,6 +27,13 @@
   outline-offset: 3px !important;
   border-radius: 3px !important;
   background-color: rgba(216, 178, 139, .11) !important;
+}
+
+/* Code passages use text ranges, preserving syntax spans and React markup. */
+:where(.sonora-code-block),
+:where(.sonora-code-block):hover {
+  outline: none !important;
+  background-color: transparent !important;
 }
 
 /* Google Docs paints the words on canvas. Its SVG annotations have the exact

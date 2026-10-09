@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createReconciler, matchesPassage, pageIdentity } = require('../extension/passages');
+const { createReconciler, matchesPassage, pageIdentity, codePassages } = require('../extension/passages');
+const { chunksFor, cleanText } = require('../public/text');
 
 function entry(text, scope = 'message:answer-a', node = {}) { return { text, scope, node }; }
 
@@ -68,4 +69,27 @@ test('conversation navigation differs from ChatGPT model changes and heading anc
   assert.notEqual(pageIdentity('https://chatgpt.com/c/one'), pageIdentity('https://chatgpt.com/c/two'));
   assert.equal(pageIdentity('https://example.com/article#one'), pageIdentity('https://example.com/article#two'));
   assert.notEqual(pageIdentity('https://example.com/article?id=one'), pageIdentity('https://example.com/article?id=two'));
+});
+
+test('code passages use complete lines and exact offsets through blank lines and repeated statements', () => {
+  const text = cleanText('run init\n\nrun test --fast \\\n  --target "Example" \\\n  --limit 100\nrun init');
+  const parts = codePassages(text, chunksFor);
+  assert.deepEqual(parts.map(part => part.text), ['run init', 'run test --fast \\', '--target "Example" \\', '--limit 100', 'run init']);
+  assert.notEqual(parts[0].offset, parts.at(-1).offset);
+  for (const part of parts) assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
+});
+
+test('braces and separators stay with readable code without creating silent passages', () => {
+  const text = '{\ncall();\n}\n\nnext();\n---';
+  assert.deepEqual(codePassages(text, chunksFor), [{ text: '{\ncall();\n}', offset: 0 }, { text: 'next();\n---', offset: 13 }]);
+  assert.deepEqual(codePassages('{\n}\n---', chunksFor), []);
+});
+
+test('oversized code lines stay within the model limit and preserve Unicode and source offsets', () => {
+  const text = cleanText('const value = "' + 'x😀'.repeat(900) + '";\nreturn value;\n}');
+  const parts = codePassages(text, chunksFor, 100);
+  assert(parts.length > 20);
+  assert(parts.every(part => part.text.length <= 100 && part.text.isWellFormed()));
+  for (const part of parts) assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
+  assert.equal(parts.map(part => part.text).join('').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });

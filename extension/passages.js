@@ -39,6 +39,22 @@
     return block ? `block:${block.getAttribute('data-block-id')}` : '';
   }
 
+  function isCodeChrome(node, root) {
+    for (let container = node.parentElement; container && container !== root; container = container.parentElement) {
+      if (container.matches('article,main,[data-message-id],[data-testid^="conversation-turn-"]')) return false;
+      const pre = container.querySelector('pre');
+      if (!pre) continue;
+      if (pre.contains(node) || node.contains(pre)) return false;
+      const prose = [...container.querySelectorAll('p,h1,h2,h3,h4,h5,h6,blockquote,li,td,th,dt,dd')]
+        .some(other => !pre.contains(other) && !node.contains(other) && !other.contains(node));
+      // Language labels and copy controls share a small container with one
+      // code box. Do not classify the surrounding message/article as chrome.
+      return !prose && container.querySelectorAll('pre').length === 1
+        && Boolean(container.querySelector('button,[role="button"],[role="toolbar"]'));
+    }
+    return false;
+  }
+
   function createReconciler() {
     let sequence = 0;
     const retained = new Map();
@@ -85,7 +101,35 @@
     return `${parsed.origin}${parsed.pathname}${chat ? '' : parsed.search}`;
   }
 
-  const api = { textNoiseSelector, visibleBlock, readableText, scopeFor, createReconciler, matchesPassage, pageIdentity };
+  function codePassages(text, chunksFor, limit = 1200) {
+    const parts = [];
+    let cursor = 0, prefix = null;
+    for (const line of text.split('\n')) {
+      const value = line.trim(), start = cursor + line.indexOf(value);
+      cursor += line.length + 1;
+      if (!value) continue;
+      let at = 0;
+      for (const chunk of chunksFor(value, limit)) {
+        const offset = start + value.indexOf(chunk, at);
+        at = offset - start + chunk.length;
+        const end = offset + chunk.length;
+        // Braces, separators and fences alone have no speech. Keep them with
+        // a neighboring readable line instead of asking the voice for silence.
+        if (!/[\p{L}\p{N}]/u.test(chunk)) {
+          const previous = parts.at(-1);
+          if (previous && end - previous.offset <= limit) previous.text = text.slice(previous.offset, end);
+          else if (!previous && prefix === null) prefix = offset;
+          continue;
+        }
+        const from = prefix !== null && end - prefix <= limit ? prefix : offset;
+        parts.push({ text: text.slice(from, end), offset: from });
+        prefix = null;
+      }
+    }
+    return parts;
+  }
+
+  const api = { textNoiseSelector, visibleBlock, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, codePassages };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraPassages = api;
 })(globalThis);
