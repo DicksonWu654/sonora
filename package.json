@@ -6,6 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "launch": "node tools/launch.js",
+    "supervisor": "node tools/supervisor.js",
     "start": "node server.js",
     "voice:setup": "node tools/narration/setup.js",
     "voice:setup:gpu": "node tools/narration/setup-gpu.js",

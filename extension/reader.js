@@ -72,7 +72,7 @@ async function checkVoice() {
     els.play.disabled = !state.chunks.length || !state.ready;
   } catch (error) {
     state.ready = false;
-    setStatus('Sonora is offline — start npm start in the book-to-voice folder.', 'error');
+    setStatus('Sonora is offline — start the Sonora supervisor.', 'error');
     els.play.disabled = true;
     if (state.checkTimer) clearTimeout(state.checkTimer);
     state.checkTimer = setTimeout(() => { state.checkTimer = null; checkVoice(); }, 3000);

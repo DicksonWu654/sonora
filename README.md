@@ -10,7 +10,7 @@ Speech runs on your computer with Kokoro 82M. There is no subscription, API key,
 
 1. Install [Node.js 22 or newer](https://nodejs.org/en/download) and [uv](https://docs.astral.sh/uv/getting-started/installation/). These are one-time prerequisites; Sonora installs Python and the voice model for you.
 2. [Download the latest Sonora ZIP](https://github.com/DicksonWu654/sonora/releases/latest/download/Sonora.zip), then extract it to a folder you will keep.
-3. Start **Start Sonora.bat** on Windows, **Start Sonora.command** on an Apple Silicon Mac, or run **Start Sonora.sh** on Linux. The first launch downloads the voice and may take several minutes. Keep the terminal window open while reading.
+3. Start **Start Sonora.bat** on Windows, **Start Sonora.command** on an Apple Silicon Mac, or run **Start Sonora.sh** on Linux. The first launch downloads the voice and may take several minutes. Keep the lightweight supervisor running while reading; it starts the local voice server on demand and stops it after five idle minutes.
 4. Open `brave://extensions` or `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and choose the extracted **extension** folder. Pin Sonora from the browser's Extensions menu.
 
 Open a page, click Sonora's toolbar icon, and click the text you want to hear. For an already open Google Doc, refresh it once after installing the extension.
@@ -37,7 +37,7 @@ There are no npm dependencies to install. Node.js and uv must already be availab
    npm run voice:setup
    ```
 
-2. Run `npm start` in one terminal. In another terminal, check a short sample, then convert your book:
+2. Run `npm run launch` in one terminal. In another terminal, check a short sample, then convert your book. The supervisor starts the voice server for the request and keeps it alive while the conversion is active:
 
    ```sh
    npm run convert -- public/moby-dick.txt --title 'Moby-Dick preview' --preview
@@ -56,16 +56,16 @@ GitHub stores application source and runs automated checks on pushes and pull re
 
 ```sh
 npm run voice:setup
-npm start
+npm run launch
 ```
 
-Open <http://127.0.0.1:8787>. Import a book, choose Heart or Bella, and select **Make short preview** or **Convert full book to MP3**. Conversion continues on the server after you close the browser. The library shows progress, retry controls, finished audio, downloads, and the private RSS URL.
+Open <http://127.0.0.1:8787>. Import a book, choose Heart or Bella, and select **Make short preview** or **Convert full book to MP3**. Conversion continues on the server after you close the browser. The library shows progress, retry controls, finished audio, downloads, and the private RSS URL. Use `npm start` instead when you want the underlying server in the foreground without on-demand shutdown.
 
 ## Read page text in Chrome or Brave
 
 The repository includes a small Manifest V3 extension in `extension/`. Click its toolbar button on any readable page and it opens an in-page Sonora panel: article text blocks, table cells, and headings on the page become clickable, with Heart or Bella voice selection, a 0.75×–3× speed control, passage progress, and background rendering of the next passage. Wikipedia navigation, infoboxes, references, and other page chrome are left out of the reading queue. Text and audio stay on this machine.
 
-1. Start Sonora with `npm start` and wait for the local voice chip to say **local voice ready**.
+1. Start Sonora with `npm run launch` and wait for the local voice chip to say **local voice ready**. The extension's first status request starts the heavy voice server; after five minutes without requests, the supervisor stops it. Set `SONORA_IDLE_MS` to change the timeout. Active book conversions keep running until they finish.
 2. Open `brave://extensions` or `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the repository's `extension/` directory.
 3. After pulling an update, click **Reload** on the Sonora card in the extensions page so Brave/Chrome runs the new unpacked files, then refresh any page that already had Sonora open. Open a page, click the Sonora toolbar button, and click any highlighted text block, table cell, or heading on the page. Playback starts at that block and continues through the remaining article; click another block at any time to jump there. The right-click action remains as a fallback; it now opens the same panel instead of a new tab. The extension uses the local server address saved by the reader, defaulting to `http://127.0.0.1:8787`.
 

@@ -566,7 +566,7 @@
         setStatus('Warming up the local voice…', 'busy');
         state.voiceTimer = setTimeout(() => { state.voiceTimer = null; checkVoice(); }, 2500);
       } else {
-        setStatus(data.message || 'Start Sonora with npm start.', 'error');
+        setStatus(data.message || 'Start the Sonora supervisor.', 'error');
         // Keep checking so installing or restarting the local model takes
         // effect without requiring the page reader to be reopened.
         state.voiceTimer = setTimeout(() => { state.voiceTimer = null; checkVoice(); }, 5000);
@@ -574,7 +574,7 @@
     } catch {
       if (state.closed) return;
       state.ready = false;
-      setStatus('Sonora is offline — start npm start in book-to-voice.', 'error');
+      setStatus('Sonora is offline — start the Sonora supervisor.', 'error');
       state.voiceTimer = setTimeout(() => { state.voiceTimer = null; checkVoice(); }, 3000);
     }
   }

@@ -22,13 +22,15 @@ async function launch() {
   }
   const port = Number(process.env.PORT || 8787);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a number between 1 and 65535.');
+  let supervisorRunning = false;
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/narration/status`, { signal: AbortSignal.timeout(1500) });
     const status = await response.json();
-    if (response.ok && typeof status.ready === 'boolean' && typeof status.state === 'string') {
+    if (response.ok && typeof status.ready === 'boolean' && typeof status.state === 'string' && status.state !== 'not-installed') {
       console.log(`Sonora is already running at http://127.0.0.1:${port}. Click its browser extension to read.`);
       return;
     }
+    supervisorRunning = response.ok && status.state === 'not-installed';
   } catch { /* Start a new server if no Sonora instance is listening. */ }
   if (!voiceInstalled()) {
     console.log('First launch: installing Python, voice dependencies, and the local model. This needs internet and may take several minutes.');
@@ -36,8 +38,12 @@ async function launch() {
     if (result.error) throw result.error;
     if (result.status !== 0) { process.exitCode = result.status || 1; return; }
   }
-  console.log(`\nSonora: http://127.0.0.1:${port}\nExtension folder: ${path.join(root, 'extension')}\nKeep this window open while reading. Press Ctrl+C to stop.\n`);
-  const server = spawn(process.execPath, [path.join(root, 'server.js')], { cwd: root, env: process.env, stdio: 'inherit' });
+  if (supervisorRunning) {
+    console.log('Local voices installed. The existing Sonora supervisor will start them on the next request.');
+    return;
+  }
+  console.log(`\nSonora: http://127.0.0.1:${port}\nExtension folder: ${path.join(root, 'extension')}\nKeep this window open while reading. The voice server starts on demand.\n`);
+  const server = spawn(process.execPath, [path.join(root, 'tools', 'supervisor.js')], { cwd: root, env: process.env, stdio: 'inherit' });
   const stop = signal => () => server.kill(signal);
   const onInterrupt = stop('SIGINT'), onTerminate = stop('SIGTERM');
   process.once('SIGINT', onInterrupt);

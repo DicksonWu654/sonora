@@ -1,6 +1,6 @@
 # Install Sonora
 
-Sonora has two parts: a browser extension and a local voice server. Install the extension once; keep the voice launcher running whenever you want to listen.
+Sonora has two parts: a browser extension and a local voice server. Install the extension once; keep the lightweight voice supervisor running whenever you want to listen. The supervisor starts the heavy voice server when the extension first contacts it, then stops the voice server after five idle minutes.
 
 ## 1. Install the prerequisites once
 
@@ -45,7 +45,7 @@ Linux has been tested. Windows and Mac launchers are provided, but hardware test
 | Mac | Double-click **Start Sonora.command**. If macOS blocks it, use Terminal as described below. |
 | Linux | Open a terminal in the extracted folder and run `sh "Start Sonora.sh"`. |
 
-The first launch creates an isolated Python 3.12 environment, installs pinned dependencies, and downloads the pinned Kokoro model. No system Python packages are changed. Following launches reuse the installed voice. Leave this terminal open while reading; press **Ctrl+C** to stop.
+The first launch creates an isolated Python 3.12 environment, installs pinned dependencies, and downloads the pinned Kokoro model. No system Python packages are changed. Following launches reuse the installed voice. Leave this terminal open while reading; press **Ctrl+C** to stop the supervisor.
 
 You can always launch from a terminal in the extracted folder:
 
@@ -88,7 +88,8 @@ Download the new ZIP, stop the launcher, and copy its files over your existing S
 | --- | --- |
 | Node.js is missing or too old | Install Node.js 22+ and reopen the launcher. On Windows, reopen terminals after installing. |
 | Install uv | Follow the official uv instructions, reopen the terminal, and launch again. The installer also checks uv's standard `~/.local/bin` location. |
-| Sonora is offline | Start the launcher and leave it open. The default server is `http://127.0.0.1:8787`. |
+| Sonora is offline | Start the launcher and leave the supervisor running. The default address is `http://127.0.0.1:8787`; the heavy voice server starts after the extension contacts it. |
+| Sonora stops after being idle | This is expected after five minutes without requests. Set `SONORA_IDLE_MS` to a longer timeout, in milliseconds. |
 | Warming up the local voice | Wait for the model to load. The first load can take longer than later ones. |
 | First-time download was interrupted | Run the launcher again. Downloads and already installed dependencies are reused. |
 | Google Docs has no passage highlights | Reload the extension, then refresh the Doc. |
