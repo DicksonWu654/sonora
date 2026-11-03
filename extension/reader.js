@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const validation = globalThis.SonoraValidation;
+const speed = globalThis.SonoraSpeed;
 const els = { title: $('source-title'), url: $('source-url'), text: $('selected-text'), count: $('passage-count'), chars: $('character-count'), status: $('status'), dot: $('status-dot'), voice: $('voice'), speed: $('speed'), speedValue: $('speed-value'), progress: $('progress'), play: $('play'), playIcon: $('play-icon'), playLabel: $('play-label'), stop: $('stop'), audio: $('audio'), server: $('server') };
 const state = { text: '', chunks: [], index: 0, rendered: new Map(), playing: false, generation: 0, audioGeneration: 0, ready: false, autoplay: false, autoAttempted: false, checkTimer: null, api: validation.DEFAULT_SERVER };
 els.audio.preservesPitch = true;
@@ -41,14 +42,17 @@ async function loadSettings() {
     const saved = await chrome.storage.local.get(['sonoraServer', 'sonoraSpeed', 'sonoraVoice']);
     state.api = validation.normalizeServerUrl(saved.sonoraServer);
     els.server.value = state.api;
-    const speed = Number(saved.sonoraSpeed);
-    if (Number.isFinite(speed) && speed >= 0.6 && speed <= 3) { els.speed.value = String(speed); updateSpeed(); }
+    if (saved.sonoraSpeed !== undefined) {
+      const migrated = speed.normalizeSpeed(saved.sonoraSpeed);
+      els.speed.value = String(migrated);
+      updateSpeed();
+    }
     if (saved.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
   } catch {
     els.server.value = state.api;
   }
 }
-function updateSpeed() { const raw = Number(els.speed.value); const speed = Number.isFinite(raw) ? Math.min(3, Math.max(0.6, raw)) : 1; els.speed.value = String(speed); els.speedValue.textContent = `${speed.toFixed(speed % 1 ? 2 : 0)}×`; els.audio.playbackRate = speed; chrome.storage.local.set({ sonoraSpeed: speed }).catch?.(() => {}); }
+function updateSpeed() { const rate = speed.normalizeSpeed(els.speed.value); els.speed.value = String(rate); els.speedValue.textContent = speed.formatSpeed(rate); els.audio.playbackRate = rate; chrome.storage.local.set({ sonoraSpeed: rate }).catch?.(() => {}); }
 async function request(path, options = {}) {
   state.api = validation.normalizeServerUrl(state.api);
   const response = await fetch(`${state.api}${path}`, options);

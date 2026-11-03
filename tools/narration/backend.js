@@ -6,7 +6,7 @@ const readline = require('readline');
 const config = require('./config');
 
 function createNarrationBackend({authorize} = {}) {
-  let worker = null, state = 'not-installed', serial = 0, startupTimer;
+  let worker = null, state = 'not-installed', serial = 0, startupTimer, activeJob = null;
   const pending = new Map(), inflight = new Map();
   const installed = () => fs.existsSync(config.python) && ['config.json','kokoro-v1_0.pth','voices/af_heart.pt','voices/af_bella.pt'].every(f=>fs.existsSync(path.join(config.modelDir,f)));
   function start() {
@@ -22,14 +22,16 @@ function createNarrationBackend({authorize} = {}) {
       const job = pending.get(event.id);
       if(!job) return;
       pending.delete(event.id); clearTimeout(job.timer);
+      if(activeJob === job) activeJob = null;
       if(event.error) job.reject(Object.assign(new Error(event.error),{status:422})); else job.resolve(event.result);
+      pump();
     });
     worker.stderr.on('data',chunk=>process.stderr.write('[narration] '+chunk.toString()));
     const fail = () => {
       if(worker !== thisWorker) return;
       state='error';worker=null;clearTimeout(startupTimer);
       for(const job of pending.values()) {clearTimeout(job.timer);job.reject(Object.assign(new Error('Local voice stopped; the saved job can be retried.'),{status:503}));}
-      pending.clear();
+      pending.clear();activeJob=null;
     };
     worker.on('error',fail);worker.on('exit',fail);
     worker.stdin.on('error',()=>{});
@@ -68,23 +70,55 @@ function createNarrationBackend({authorize} = {}) {
       return {...data,cached:true};
     }catch{return null;}finally{await file?.close();}
   }
-  async function generate(text,voice) {
+  function pump() {
+    if(activeJob || !worker || state !== 'ready') return;
+    const job=pending.values().next().value;
+    if(!job) return;
+    activeJob=job;job.sent=true;
+    job.timer=setTimeout(()=>{if(pending.has(job.id))worker?.kill();},180000);
+    worker.stdin.write(JSON.stringify({id:job.id,text:job.text,voice:job.voice})+'\n');
+  }
+  async function generate(text,voice,{signal} = {}) {
+    signal?.throwIfAborted();
     const key=keyFor(text,voice);
-    // Cache hits remain usable even when the model has not warmed up.
     const cached=await readCache(key,text,voice);
+    signal?.throwIfAborted();
     if(cached)return cached;
     if(!worker && installed()) start();
     if(state !== 'ready') throw Object.assign(new Error(!installed()?'Install the local voice with npm run voice:setup.':'The local voice is still warming up. Please try again in a moment.'),{status:503});
-    if(inflight.has(key)) return inflight.get(key);
-    if(pending.size >= 6) throw Object.assign(new Error('The local voice queue is full. Please wait for the current passage.'),{status:429});
-    const promise=new Promise((resolve,reject)=>{
-      const id=++serial;
-      const timer=setTimeout(()=>{if(pending.has(id)){worker?.kill();}},180000);
-      pending.set(id,{resolve,reject,timer});
-      worker.stdin.write(JSON.stringify({id,text,voice})+'\n');
+    let job=inflight.get(key);
+    if(!job) {
+      if(pending.size >= 6) throw Object.assign(new Error('The local voice queue is full. Please wait for the current passage.'),{status:429});
+      job={id:++serial,text,voice,consumers:0,sent:false,timer:null};
+      job.promise=new Promise((resolve,reject)=>{job.resolve=resolve;job.reject=reject;});
+      pending.set(job.id,job);inflight.set(key,job);
+      const release=()=>{if(inflight.get(key)===job)inflight.delete(key);};
+      job.promise.then(release,release);
+    }
+    // Only one request enters the Python pipe at a time. Disconnected readers
+    // release queued jobs; a shared request still needed by a book stays alive.
+    job.consumers++;
+    const result=new Promise((resolve,reject)=>{
+      let settled=false;
+      const finish=(callback,value)=>{
+        if(settled)return;
+        settled=true;signal?.removeEventListener('abort',abort);job.consumers--;
+        callback(value);
+      };
+      const abort=()=>{
+        finish(reject,signal.reason || new Error('Narration cancelled.'));
+        if(!job.consumers && !job.sent) {
+          pending.delete(job.id);
+          if(inflight.get(key)===job)inflight.delete(key);
+          job.reject(signal.reason || new Error('Narration cancelled.'));
+        }
+      };
+      signal?.addEventListener('abort',abort,{once:true});
+      job.promise.then(value=>finish(resolve,value),error=>finish(reject,error));
+      if(signal?.aborted)abort();
     });
-    inflight.set(key,promise);
-    try{return await promise;}finally{inflight.delete(key);}
+    pump();
+    return result;
   }
   function serveAudio(req,res,pathname) {
     const match=/^\/api\/narration\/audio\/([a-f0-9]{64})\.wav$/.exec(pathname);
@@ -126,8 +160,14 @@ function createNarrationBackend({authorize} = {}) {
         if(!input||typeof input!=='object'||typeof input.text!=='string'||!input.text.trim()||input.text.length>4000||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(input.text)){json(res,400,{error:'Provide between 1 and 4000 characters of readable text.'});return true;}
         const voice=input.voice||'af_heart';
         if(!config.voices.some(v=>v.id===voice)){json(res,400,{error:'Unknown local voice.'});return true;}
-        const result=await generate(input.text,voice);
-        if(!res.destroyed)json(res,200,result);
+        const controller=new AbortController();
+        const disconnect=()=>{if(!res.writableEnded)controller.abort(new Error('Reader disconnected.'));};
+        res.on('close',disconnect);
+        try {
+          if(res.destroyed)disconnect();
+          const result=await generate(input.text,voice,{signal:controller.signal});
+          if(!res.destroyed)json(res,200,result);
+        } finally {res.removeListener('close',disconnect);}
       }catch(error){if(!res.destroyed)json(res,error.status||500,{error:error.status?error.message:'Could not render this passage.'});}
       return true;
     }

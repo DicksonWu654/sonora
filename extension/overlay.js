@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.2';
+  const OVERLAY_VERSION = '0.4.3';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -11,6 +11,7 @@
   }
 
   const { cleanText, chunksFor } = window.BookText;
+  const speed = window.SonoraSpeed;
   const MAX_PAGE_CHARS = 240000;
   const PAGE_CLASS = 'sonora-readable-block';
   const CURRENT_CLASS = 'sonora-current-block';
@@ -19,9 +20,18 @@
   let docsDocumentChanged = false;
   let reconcileEntries = window.SonoraPassages.createReconciler();
   let pageEntries = [];
+  const entriesByKey = new Map();
+  const entriesByNode = new WeakMap();
+  const entriesByScope = new Map();
+  let orderedEntriesDirty = false;
+  let characterCount = 0;
+  let entryCount = 0;
+  let domRevision = 0;
+  const extractionCache = new WeakMap();
+  const dirtyTextNodes = new WeakSet();
   const source = findReadableSource();
   let pageText = cleanText(source.text).slice(0, MAX_PAGE_CHARS);
-  let blockEntries = makeBlockEntries(source.blocks);
+  let blockEntries = [];
   const root = document.createElement('div');
   root.id = 'sonora-overlay-root';
   const shadow = root.attachShadow({ mode: 'closed' });
@@ -51,8 +61,12 @@
       .dot.error { background: #dc8d71; }
       .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 0 16px 14px; }
       label { display: grid; gap: 5px; color: #849186; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; text-transform: uppercase; }
-      select { width: 100%; min-height: 34px; padding: 0 8px; border: 1px solid #354239; border-radius: 5px; outline: 0; background: #202b23; color: #dce1d9; font-size: 11px; text-transform: none; letter-spacing: 0; }
-      select:focus-visible, button:focus-visible { outline: 2px solid #d8b28b; outline-offset: 2px; }
+      select, input[type="range"] { width: 100%; min-height: 34px; }
+      select { padding: 0 8px; border: 1px solid #354239; border-radius: 5px; outline: 0; background: #202b23; color: #dce1d9; font-size: 11px; text-transform: none; letter-spacing: 0; }
+      input[type="range"] { accent-color: #d8b28b; }
+      .speed-caption { display: flex; justify-content: space-between; }
+      output { color: #d8b28b; letter-spacing: 0; }
+      select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid #d8b28b; outline-offset: 2px; }
       .selection { margin: 0 16px 14px; padding: 13px 14px; border: 1px solid #354239; border-radius: 7px; background: #18221b; }
       .selection-title { margin: 0 0 5px; color: #d8b28b; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
       .selection-copy { margin: 0; color: #aeb8ac; font: 12px/1.45 Georgia, "Times New Roman", serif; }
@@ -73,7 +87,7 @@
       <header class="top"><span class="mark" aria-hidden="true">◒</span><span class="brand">sonora</span><span class="local"><i></i> local voice</span><button class="icon minimize" type="button" aria-label="Minimize Sonora">−</button><button class="icon close" type="button" aria-label="Close Sonora">×</button></header>
       <section class="heading"><p class="eyebrow">CLICK PAGE TEXT TO READ</p><h2></h2><p class="meta"></p></section>
       <div class="status"><i class="dot"></i><span></span></div>
-      <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label>Speed<select class="speed" aria-label="Speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="2.25">2.25×</option><option value="2.5">2.5×</option><option value="2.75">2.75×</option><option value="3">3×</option></select></label></section>
+      <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label><span class="speed-caption">Speed <output class="speed-value" for="sonora-speed">1×</output></span><input id="sonora-speed" class="speed" aria-label="Speed" type="range" min="1" max="3" step="0.1" value="1"></label></section>
       <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any highlighted text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
       <footer class="bottom"><div class="transport"><button class="stop" type="button">Stop</button><button class="play" type="button"><span class="play-icon">▶</span> <span class="play-label">Play from top</span></button></div><div class="track" aria-hidden="true"><i></i></div><p class="hint">Your page stays in place while Sonora reads.</p></footer>
       <audio preload="auto"></audio>
@@ -95,12 +109,13 @@
   if (!attachRoot()) document.addEventListener('DOMContentLoaded', attachRoot, { once: true });
   const els = {
     panel: shadow.querySelector('.panel'), title: shadow.querySelector('h2'), meta: shadow.querySelector('.meta'), status: shadow.querySelector('.status span'), dot: shadow.querySelector('.dot'),
-    voice: shadow.querySelector('.voice'), speed: shadow.querySelector('.speed'), play: shadow.querySelector('.play'), playIcon: shadow.querySelector('.play-icon'), playLabel: shadow.querySelector('.play-label'), stop: shadow.querySelector('.stop'), track: shadow.querySelector('.track i'), audio: shadow.querySelector('audio'), minimize: shadow.querySelector('.minimize'), close: shadow.querySelector('.close')
+    voice: shadow.querySelector('.voice'), speed: shadow.querySelector('.speed'), speedValue: shadow.querySelector('.speed-value'), play: shadow.querySelector('.play'), playIcon: shadow.querySelector('.play-icon'), playLabel: shadow.querySelector('.play-label'), stop: shadow.querySelector('.stop'), track: shadow.querySelector('.track i'), audio: shadow.querySelector('audio'), minimize: shadow.querySelector('.minimize'), close: shadow.querySelector('.close')
   };
   const state = {
     index: -1,
     queue: [],
     rendered: new Map(),
+    renderRequests: new Map(),
     ready: false,
     playing: false,
     revision: 0,
@@ -125,6 +140,8 @@
     status: 'Checking the local voice…'
   };
   let refreshTimer = null;
+  const dirtyScopes = new Map();
+  let fullRefreshPending = false;
   let sourceUrl = location.href;
   const navigationTimer = setInterval(() => {
     if (sourceUrl !== location.href) scheduleBlockRefresh();
@@ -138,7 +155,9 @@
   const currentClass = CURRENT_CLASS;
   let docsHover = null;
   let codeHoverPoint = null;
+  let codeHoverFrame = null;
   els.audio.preservesPitch = true;
+  applySpeed(els.speed.value);
 
   els.title.textContent = source.title || document.title || 'Untitled page';
   els.meta.textContent = `${blockEntries.length} clickable ${blockEntries.length === 1 ? 'block' : 'blocks'} · ${pageText.length.toLocaleString()} characters${source.truncated ? ' · first 240,000 shown' : ''}`;
@@ -155,13 +174,24 @@
       result?.catch?.(() => {});
     } catch { /* Storage can be unavailable in restricted test pages. */ }
   }
+  function applySpeed(value, persist = false) {
+    const rate = speed.normalizeSpeed(value);
+    els.speed.value = String(rate);
+    els.speedValue.textContent = speed.formatSpeed(rate);
+    els.audio.playbackRate = rate;
+    if (persist) saveSetting('sonoraSpeed', rate);
+    return rate;
+  }
   function loadSettings() {
     try {
       const storage = chrome.storage?.local;
       if (!storage?.get) return;
       Promise.resolve(storage.get(['sonoraSpeed', 'sonoraVoice'])).then(saved => {
         if (state.closed) return;
-        if (!changedSettings.has('sonoraSpeed') && saved?.sonoraSpeed !== undefined && [...els.speed.options].some(option => option.value === String(saved.sonoraSpeed))) els.speed.value = String(saved.sonoraSpeed);
+        if (!changedSettings.has('sonoraSpeed') && saved?.sonoraSpeed !== undefined) {
+          const migrated = applySpeed(saved.sonoraSpeed);
+          if (migrated !== Number(saved.sonoraSpeed)) saveSetting('sonoraSpeed', migrated);
+        }
         if (!changedSettings.has('sonoraVoice') && saved?.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
       }).catch(() => {});
     } catch { /* Storage can be unavailable in restricted test pages. */ }
@@ -180,8 +210,10 @@
       }
     });
   }
+  const markedNodes = new Set();
   function clearCurrentBlock() {
-    blockEntries.forEach(entry => (entry.nodes || [entry.node]).forEach(node => node.classList.remove(currentClass)));
+    markedNodes.forEach(node => node.classList.remove(currentClass));
+    markedNodes.clear();
     window.CSS?.highlights?.delete('sonora-current-code');
   }
   function markCodePart(entry, part, name) {
@@ -197,27 +229,33 @@
   function codePartAt(entry, x, y) {
     const bounds = entry.contentNode.getBoundingClientRect();
     if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
-    let nearest = null, distance = Infinity;
-    for (const part of entry.parts) {
-      const range = codeRange(entry, part.offset, part.text.length);
-      for (const rect of range?.getClientRects() || []) {
-        if (rect.width <= 0 || rect.height <= 0 || y < rect.top || y > rect.bottom) continue;
-        const gap = Math.max(rect.left - x, x - rect.right, 0);
-        if (!gap) return part;
-        if (gap < distance) { nearest = part; distance = gap; }
-      }
+    const offset = codeRange.offsetAt(entry, x, y);
+    if (offset === null) return null;
+    let low = 0, high = entry.parts.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (entry.parts[middle].offset <= offset) low = middle + 1;
+      else high = middle;
     }
-    return nearest;
+    return entry.parts[Math.max(0, low - 1)] || null;
   }
+
   function updateCodeHover() {
     const point = codeHoverPoint;
     const block = point && document.elementFromPoint(point.x, point.y)?.closest('.sonora-code-block');
-    const entry = block && blockEntries.find(candidate => candidate.node === block);
+    const entry = block && entriesByNode.get(block);
     markCodePart(entry, entry && codePartAt(entry, point.x, point.y), 'sonora-hover-code');
+  }
+  function scheduleCodeHover() {
+    if (codeHoverFrame !== null) return;
+    codeHoverFrame = requestAnimationFrame(() => {
+      codeHoverFrame = null;
+      updateCodeHover();
+    });
   }
   function currentEntry() {
     const item = state.queue[state.index];
-    return item && blockEntries.find(entry => item.blockKey ? entry.key === item.blockKey : entry.index === item.blockIndex);
+    return item && (item.blockKey ? entriesByKey.get(item.blockKey) : blockEntries[item.blockIndex]);
   }
   function paintCurrentWord() {
     const position = state.webAudioBuffer ? webAudioPosition() : els.audio.currentTime;
@@ -240,8 +278,8 @@
   function resetWords() { stopWordFrames(); wordTracker.reset(); }
   function markCurrentBlock(blockIndex, blockKey) {
     clearCurrentBlock();
-    const entry = blockEntries.find(candidate => blockKey ? candidate.key === blockKey : candidate.index === blockIndex);
-    if (entry) (entry.nodes || [entry.node]).forEach(node => node.classList.add(currentClass));
+    const entry = blockKey ? entriesByKey.get(blockKey) : blockEntries[blockIndex];
+    if (entry) (entry.nodes || [entry.node]).forEach(node => { node.classList.add(currentClass); markedNodes.add(node); });
     const item = state.queue[state.index];
     if (entry?.kind === 'code' && item) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
   }
@@ -375,11 +413,14 @@
     stopWordFrames();
     pauseWebAudio();
     els.audio.pause();
+    // Prefetch should not keep using the voice while the reader is paused.
+    for (const index of state.renderRequests.keys()) { cancelRender(index); state.rendered.delete(index); }
     if (state.pendingRender) {
       // A render may still be waiting on the local model. Invalidate that
       // request so its eventual response cannot start playback after pause.
       state.revision++;
       state.pendingRender = false;
+      cancelRendered();
     }
     state.playing = false;
     if (state.index >= 0 && !state.completed) paintCurrentWord();
@@ -399,21 +440,19 @@
     return objectUrl;
   }
   function queueFrom(blockIndex = 0, limit = MAX_PAGE_CHARS, blockOffset = 0) {
+    ensureOrderedEntries();
     const queue = [];
     let remaining = limit;
-    for (const entry of blockEntries) {
-      if (entry.index < blockIndex || remaining <= 0) continue;
+    for (let at = blockIndex; at < blockEntries.length && remaining > 0; at++) {
+      const entry = blockEntries[at];
       const blockText = entry.text.slice(0, remaining);
       const pieces = entry.kind === 'code' ? null : chunksFor(blockText, 1200);
       const offsets = pieces && window.SonoraWords.chunkOffsets(blockText, pieces);
-      const chunks = entry.kind === 'code' ? window.SonoraPassages.codePassages(blockText, chunksFor)
+      const chunks = entry.kind === 'code' ? (blockText.length === entry.text.length ? entry.parts : window.SonoraPassages.codePassages(blockText, chunksFor))
         : pieces.map((text, at) => ({ text, offset: offsets[at] }));
       chunks.filter(part => entry.index !== blockIndex || part.offset >= blockOffset)
         .forEach(part => queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset }));
       remaining -= blockText.length;
-    }
-    if (!queue.length && blockIndex === 0 && pageText && !isGoogleDocsPage()) {
-      chunksFor(pageText, 1200).forEach(chunk => queue.push({ text: chunk, blockIndex: null }));
     }
     return queue;
   }
@@ -421,14 +460,27 @@
     const item = state.queue[index];
     if (!item) return Promise.reject(new Error('No readable passage is selected.'));
     if (state.rendered.has(index)) return state.rendered.get(index);
-    const promise = message({ type: 'sonora-render', text: item.text, voice: els.voice.value });
+    const requestId = `${state.revision}:${index}:${Math.random().toString(36).slice(2)}`;
+    const promise = message({ type: 'sonora-render', requestId, text: item.text, voice: els.voice.value });
     state.rendered.set(index, promise);
-    promise.catch(() => { if (state.rendered.get(index) === promise) state.rendered.delete(index); });
+    state.renderRequests.set(index, requestId);
+    promise.catch(() => { if (state.rendered.get(index) === promise) state.rendered.delete(index); })
+      .finally(() => { if (state.renderRequests.get(index) === requestId) state.renderRequests.delete(index); });
     return promise;
+  }
+  function cancelRender(index) {
+    const requestId = state.renderRequests.get(index);
+    if (!requestId) return;
+    state.renderRequests.delete(index);
+    message({ type: 'sonora-cancel-render', requestId }).catch(() => {});
+  }
+  function cancelRendered() {
+    for (const index of state.renderRequests.keys()) cancelRender(index);
+    state.rendered.clear();
   }
   function trimRendered(index) {
     for (const key of state.rendered.keys()) {
-      if (key < index || key > index + 1) state.rendered.delete(key);
+      if (key < index || key > index + 1) { cancelRender(key); state.rendered.delete(key); }
     }
   }
   async function play(index = state.index < 0 ? 0 : state.index) {
@@ -498,6 +550,8 @@
     }
   }
   function startQueue(blockIndex = 0, blockOffset = 0) {
+    const selected = state.queue[state.index];
+    if (state.pendingRender && selected?.blockKey === blockEntries[blockIndex]?.key && selected.blockOffset === blockOffset) return;
     const queue = queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset);
     if (!queue.length) {
       setStatus(isGoogleDocsPage() ? readyMessage() : 'No readable text was found in that block.', 'error');
@@ -507,7 +561,7 @@
     state.revision++;
     state.queue = queue;
     const startIndex = 0;
-    state.rendered.clear();
+    cancelRendered();
     state.index = -1;
     state.playing = false;
     state.pendingRender = false;
@@ -533,6 +587,7 @@
   function stop() {
     resetWords();
     state.revision++;
+    cancelRendered();
     state.pendingStart = null;
     state.pendingRender = false;
     state.playing = false;
@@ -586,7 +641,11 @@
       event.preventDefault();
       event.stopPropagation();
     }
-    const entry = blockEntries.find(candidate => candidate.node === block || candidate.nodes?.includes(block));
+    if (dirtyScopes.has(window.SonoraPassages.scopeFor(block))) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshBlocks();
+    }
+    const entry = entriesByNode.get(block);
     if (!entry) return;
     const part = entry.kind === 'code' && event.detail !== 0 ? codePartAt(entry, event.clientX, event.clientY) : null;
     if (entry.kind === 'code' && event.detail !== 0 && !part) return;
@@ -594,10 +653,15 @@
       event.preventDefault();
       event.stopPropagation();
     }
+    ensureOrderedEntries();
     startQueue(entry.index, part?.offset || 0);
   }
   function updateBlocks(nextBlocks, navigated = false) {
     const nextEntries = makeBlockEntries(nextBlocks);
+    entriesByKey.clear();
+    entriesByScope.clear();
+    characterCount = entryCount = 0;
+    nextEntries.forEach(indexEntry);
     const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
     const activeEntry = activeItem && nextEntries.find(entry => entry.key === activeItem.blockKey);
     const edited = !isGoogleDocsPage() && activeEntry && !window.SonoraPassages.matchesPassage(activeEntry, activeItem);
@@ -613,7 +677,7 @@
       state.completed = false;
       state.queue = [];
       resetWords();
-      state.rendered.clear();
+      cancelRendered();
       els.audio.pause();
       resetWebAudio();
       releaseAudioObjectUrl();
@@ -638,7 +702,7 @@
       knownBlocks.add(node);
     }));
     blockEntries = nextEntries;
-    if (!isGoogleDocsPage()) updateCodeHover();
+    if (!isGoogleDocsPage()) scheduleCodeHover();
     if (!changed && isGoogleDocsPage() && state.queue.length) {
       // Continue through newly rendered pages after the queued snapshot. Keys
       // survive tile replacement and index shifts from earlier discoveries.
@@ -657,14 +721,70 @@
       if (!state.completed) paintCurrentWord();
     }
     const updatedText = cleanText(nextEntries.map(entry => entry.text).join('\n\n'));
-    pageText = (updatedText || cleanText(source.text)).slice(0, MAX_PAGE_CHARS);
-    els.meta.textContent = `${blockEntries.length} clickable ${blockEntries.length === 1 ? 'block' : 'blocks'} · ${pageText.length.toLocaleString()} characters${source.truncated ? ' · first 240,000 shown' : ''}`;
+    pageText = updatedText.slice(0, MAX_PAGE_CHARS);
+    updateMeta();
     if (isGoogleDocsPage() && state.ready && !state.queue.length) setStatus(readyMessage(), blockEntries.length ? 'ready' : 'error');
   }
+  function indexEntry(entry) {
+    entriesByKey.set(entry.key, entry);
+    (entry.nodes || [entry.node]).forEach(node => entriesByNode.set(node, entry));
+    if (!entriesByScope.has(entry.scope)) entriesByScope.set(entry.scope, []);
+    entriesByScope.get(entry.scope).push(entry);
+    characterCount += entry.text.length;
+    entryCount++;
+  }
+  function ensureOrderedEntries() {
+    if (!orderedEntriesDirty) return;
+    blockEntries = [...entriesByKey.values()].sort((a, b) => a.node === b.node ? 0 : (a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    blockEntries.forEach((entry, index) => { entry.index = index; });
+    pageEntries = blockEntries;
+    orderedEntriesDirty = false;
+  }
+  function updateMeta() {
+    const size = characterCount + Math.max(0, entryCount - 1) * 2;
+    els.meta.textContent = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
+  }
+
   function refreshBlocks() {
     refreshTimer = null;
     const navigated = !isGoogleDocsPage() && window.SonoraPassages.pageIdentity(sourceUrl) !== window.SonoraPassages.pageIdentity(location.href);
-    if (navigated) { pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
+    if (isChatGPTPage() && dirtyScopes.size && !fullRefreshPending && !navigated && source.root?.isConnected) {
+      const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
+      for (const [scope, node] of dirtyScopes) {
+        const previous = entriesByScope.get(scope) || [];
+        const next = reconcileEntries(previous, makeIncomingEntries(node.isConnected ? selectReadableBlocks(node, source.noiseSelector) : []));
+        previous.forEach(entry => {
+          characterCount -= entry.text.length;
+          entryCount--;
+          entriesByKey.delete(entry.key);
+          entriesByNode.delete(entry.node);
+          knownBlocks.delete(entry.node);
+          entry.node.classList.remove(pageClass, currentClass, 'sonora-code-block');
+        });
+        entriesByScope.delete(scope);
+        next.forEach(entry => {
+          indexEntry(entry);
+          entry.node.classList.add(pageClass);
+          entry.node.classList.toggle('sonora-code-block', entry.kind === 'code');
+          knownBlocks.add(entry.node);
+        });
+        if (activeItem && previous.some(entry => entry.key === activeItem.blockKey)) {
+          const activeEntry = entriesByKey.get(activeItem.blockKey);
+          if (activeEntry && !window.SonoraPassages.matchesPassage(activeEntry, activeItem)) {
+            stop();
+            state.queue = [];
+            setStatus('This passage changed — click it to read the updated text.', 'ready');
+          } else if (activeEntry) markCurrentBlock(activeEntry.index, activeEntry.key);
+        }
+      }
+      orderedEntriesDirty = true;
+      dirtyScopes.clear();
+      updateMeta();
+      return;
+    }
+    dirtyScopes.clear();
+    fullRefreshPending = false;
+    if (navigated) { orderedEntriesDirty = false; pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
     if (sourceUrl !== location.href || !source.root?.isConnected) {
       const nextSource = findReadableSource();
       sourceUrl = location.href;
@@ -675,14 +795,31 @@
       source.noiseSelector = nextSource.noiseSelector;
       els.title.textContent = source.title || document.title || 'Untitled page';
     }
+    ensureOrderedEntries();
+    knownBlocks.forEach(node => dirtyTextNodes.add(node));
     const nextBlocks = selectReadableBlocks(source.root, source.noiseSelector);
     updateBlocks(nextBlocks, navigated);
   }
-  function scheduleBlockRefresh() {
+  function scheduleBlockRefresh(records) {
+    if (records && typeof records[Symbol.iterator] === 'function' && isChatGPTPage()) {
+      for (const record of records) {
+        let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
+        while (node && source.root?.contains(node)) {
+          dirtyTextNodes.add(node);
+          if (node === source.root) break;
+          node = node.parentElement;
+        }
+      }
+      const batch = window.SonoraPassages.mutationScopes(records, root, source.root);
+      batch.scopes.forEach(scopeNode => dirtyScopes.set(window.SonoraPassages.scopeFor(scopeNode), scopeNode));
+      fullRefreshPending ||= batch.full;
+      if (!dirtyScopes.size && !fullRefreshPending && sourceUrl === location.href) return;
+    } else fullRefreshPending = true;
     if (refreshTimer) return;
-    refreshTimer = setTimeout(refreshBlocks, 500);
+    refreshTimer = setTimeout(refreshBlocks, 100);
   }
   updateBlocks(source.blocks);
+  source.blocks = [];
   const pageClickListener = event => {
     if (!(event.target instanceof Element)) return;
     if (event.target === root || root.contains(event.target)) return;
@@ -711,7 +848,7 @@
   const docsPointerListener = event => {
     if (!isGoogleDocsPage()) {
       codeHoverPoint = { x: event.clientX, y: event.clientY };
-      updateCodeHover();
+      scheduleCodeHover();
       return;
     }
     const surface = googleDocsSurface(source.root);
@@ -724,7 +861,7 @@
   document.addEventListener('pointermove', docsPointerListener, true);
   const wordPositionListener = () => {
     if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord();
-    if (!isGoogleDocsPage()) updateCodeHover();
+    if (!isGoogleDocsPage()) scheduleCodeHover();
   };
   document.addEventListener('scroll', wordPositionListener, true);
   window.addEventListener('resize', wordPositionListener);
@@ -736,7 +873,7 @@
     // editors commonly replace the readable root in place.
     const rootNode = document.body || document.documentElement || source.root;
     if (!rootNode) return false;
-    pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true });
+    pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-hidden', 'style'] });
     return true;
   };
   if (!observeSource()) {
@@ -818,28 +955,33 @@
       setStatus('Page section complete — click another block to jump.', 'ready');
     }
   }
-  els.speed.addEventListener('change', () => {
-    const rate = Number(els.speed.value) || 1;
-    saveSetting('sonoraSpeed', rate);
-    els.audio.playbackRate = rate;
+  els.speed.addEventListener('input', () => {
+    applySpeed(els.speed.value, true);
     if (state.webAudioSource || (state.playing && state.webAudioBuffer)) {
+      const position = webAudioPosition();
       pauseWebAudio();
       const revision = state.revision;
-      playWebAudio(state.webAudioSourceData, revision, state.webAudioOffset).catch(error => {
+      playWebAudio(state.webAudioSourceData, revision, position).then(started => {
+        if (started && revision === state.revision && !state.closed) {
+          state.playing = true;
+          startWordFrames();
+        }
+      }).catch(error => {
         if (revision !== state.revision || state.closed) return;
         state.playing = false;
         updateTransport();
         setStatus(error.message, 'error');
       });
     }
+    updateTransport();
   });
   els.voice.addEventListener('change', () => {
     saveSetting('sonoraVoice', els.voice.value);
     const item = state.queue[state.index];
-    const currentBlock = item?.blockKey ? blockEntries.find(entry => entry.key === item.blockKey)?.index : item?.blockIndex;
+    ensureOrderedEntries();
+    const currentBlock = item?.blockKey ? entriesByKey.get(item.blockKey)?.index : item?.blockIndex;
     const hadQueue = state.queue.length > 0;
     stop();
-    state.rendered.clear();
     if (currentBlock !== undefined) startQueue(currentBlock);
     else if (hadQueue) startQueue(0);
   });
@@ -848,6 +990,7 @@
     resetWords();
     state.closed = true;
     state.revision++;
+    cancelRendered();
     els.audio.pause();
     resetWebAudio();
     state.audioContext?.close().catch(() => {});
@@ -862,6 +1005,7 @@
     window.removeEventListener('popstate', scheduleBlockRefresh);
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (codeHoverFrame !== null) cancelAnimationFrame(codeHoverFrame);
     clearInterval(navigationTimer);
     if (state.voiceTimer) clearTimeout(state.voiceTimer);
     knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block'));
@@ -880,15 +1024,22 @@
 
   function readableText(node) {
     if (!node) return '';
-    if (node.matches?.('pre')) node = node.querySelector('code') || node;
-    if (isGoogleDocsPage() && node.matches?.('g[role="paragraph"]')) {
-      return cleanText([...node.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '));
-    }
-    return window.SonoraPassages.readableText(node, cleanText);
+    const cached = extractionCache.get(node);
+    if (cached && !dirtyTextNodes.has(node)) return cached.text;
+    const contentNode = node.matches?.('pre') ? node.querySelector('code') || node : node;
+    const text = isGoogleDocsPage() && contentNode.matches?.('g[role="paragraph"]')
+      ? cleanText([...contentNode.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '))
+      : window.SonoraPassages.readableText(contentNode, cleanText);
+    extractionCache.set(node, { text, revision: ++domRevision });
+    dirtyTextNodes.delete(node);
+    return text;
   }
 
   function isGoogleDocsPage() {
     return /(^|\.)docs\.google\.com$/i.test(location.hostname) && /^\/document\//.test(location.pathname);
+  }
+  function isChatGPTPage() {
+    return /^(chatgpt\.com|chat\.openai\.com)$/i.test(location.hostname);
   }
 
   function googleDocsSurface(root) {
@@ -904,15 +1055,22 @@
       docsEntries = window.SonoraDocs.mergePassages(docsEntries, window.SonoraDocs.passages(surface, cleanText), cleanText);
       return docsEntries;
     }
-    const incoming = nodes.map(node => {
+    const incoming = makeIncomingEntries(nodes);
+    pageEntries = reconcileEntries(pageEntries, incoming);
+    orderedEntriesDirty = false;
+    return pageEntries;
+  }
+
+  function makeIncomingEntries(nodes) {
+    return nodes.map(node => {
       const text = readableText(node);
-      return { node, text, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
-        ? { kind: 'code', contentNode: node.querySelector('code') || node, parts: window.SonoraPassages.codePassages(text, chunksFor) } : {}) };
+      const cached = extractionCache.get(node);
+      if (node.matches('pre') && !cached.parts) cached.parts = window.SonoraPassages.codePassages(text, chunksFor);
+      return { node, text, domRevision: cached.revision, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
+        ? { kind: 'code', contentNode: node.querySelector('code') || node, parts: cached.parts } : {}) };
     })
       .filter(entry => entry.kind === 'code' ? entry.parts.length > 0
         : entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
-    pageEntries = reconcileEntries(pageEntries, incoming);
-    return pageEntries;
   }
 
   function selectReadableBlocks(root, noiseSelector) {
@@ -969,8 +1127,15 @@
       const directText = cleanText([...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.nodeValue).join(' '));
       return value.length > 1 && directText.length > 1 && !node.querySelector(semanticSelector);
     });
+    const leafText = [...root.querySelectorAll('div, section, span')].filter(node => {
+      if (node.closest(noiseSelector) || node.closest('pre') || !window.SonoraPassages.visibleBlock(node)) return false;
+      if (window.SonoraPassages.isCodeChrome(node, root) || node.querySelector('div, section, span')) return false;
+      const value = readableText(node);
+      return value.length > 1 && !node.querySelector(semanticSelector);
+    });
     const leafGeneric = generic.filter(node => !generic.some(parent => parent !== node && parent.contains(node)));
-    const uncoveredGeneric = leafGeneric.filter(node => !blocks.some(block => block.contains(node) || node.contains(block)));
+    const uncoveredGeneric = [...leafGeneric, ...leafText.filter(node => !leafGeneric.some(parent => parent.contains(node)))].filter((node, index, all) => all.indexOf(node) === index)
+      .filter(node => !blocks.some(block => block.contains(node) || node.contains(block)));
     const accessibleLeaves = [...root.querySelectorAll(accessibleTextSelector)].filter(node => {
       if (node.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(node)) return false;
       const value = readableText(node);

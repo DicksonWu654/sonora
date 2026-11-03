@@ -1,10 +1,13 @@
 (function (root) {
-  const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],.sr-only,.visually-hidden';
+  const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden';
 
   function visibleBlock(node) {
     if (!node?.isConnected || node.closest(textNoiseSelector)) return false;
     const style = node.ownerDocument.defaultView.getComputedStyle(node);
     if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (node.ownerDocument.defaultView.getComputedStyle(ancestor).opacity === '0') return false;
+    }
     return [...node.getClientRects()].some(rect => rect.width > 1 && rect.height > 1);
   }
 
@@ -12,9 +15,6 @@
     if (!node) return '';
     if (!node.isConnected) return cleanText(node.textContent || '');
     const nestedList = node.matches('li') && node.querySelector('ul,ol,menu');
-    if (!nestedList && !node.querySelector(textNoiseSelector)) {
-      return cleanText(node.innerText || node.getAttribute('aria-label') || node.textContent || '');
-    }
     // Read the live layout without replacing page markup. Toolbars and hidden
     // speaker labels can be nested inside an otherwise readable paragraph.
     const read = child => {
@@ -22,19 +22,19 @@
       if (child.nodeType !== 1 || child.matches(textNoiseSelector)) return '';
       if (nestedList && child !== node && child.matches('ul,ol,menu')) return '';
       const style = node.ownerDocument.defaultView.getComputedStyle(child);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return '';
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return '';
       if (child.matches('br')) return '\n';
       const text = [...child.childNodes].map(read).join('');
       return /^(block|list-item|table-row|table-cell|flex|grid)$/.test(style.display) ? `\n${text}\n` : text;
     };
-    return cleanText(read(node));
+    return cleanText(read(node) || node.getAttribute('aria-label') || '');
   }
 
   function scopeFor(node) {
-    const message = node.closest('[data-message-id]');
-    if (message) return `message:${message.getAttribute('data-message-id')}`;
     const turn = node.closest('[data-testid^="conversation-turn-"]');
     if (turn) return `turn:${turn.getAttribute('data-testid')}`;
+    const message = node.closest('[data-message-id]');
+    if (message) return `message:${message.getAttribute('data-message-id')}`;
     const block = node.closest('[data-block-id]');
     return block ? `block:${block.getAttribute('data-block-id')}` : '';
   }
@@ -57,13 +57,26 @@
 
   function createReconciler() {
     let sequence = 0;
-    const retained = new Map();
+    const retained = new Map(), retainedByScope = new Map();
+    const RETAINED_LIMIT = 1200, RETAINED_CHAR_LIMIT = 2000000;
+    let retainedCharacters = 0;
+    function forget(key) {
+      const entry = retained.get(key);
+      if (!entry) return;
+      retainedCharacters -= entry.text.length || 0;
+      retained.delete(key);
+      const scope = retainedByScope.get(entry.scope);
+      scope?.delete(key);
+      if (!scope?.size) retainedByScope.delete(entry.scope);
+    }
     return function reconcile(previous, incoming) {
       const byNode = new Map(previous.map(entry => [entry.node, entry]));
       const byText = new Map();
       const identity = entry => JSON.stringify([entry.scope || '', entry.text]);
       const previousKeys = new Set(previous.map(entry => entry.key));
-      const candidates = [...previous, ...[...retained.values()].filter(entry => !previousKeys.has(entry.key))];
+      const scopes = new Set([...previous, ...incoming].map(entry => entry.scope || ''));
+      const remembered = [...scopes].flatMap(scope => [...(retainedByScope.get(scope)?.values() || [])]);
+      const candidates = [...previous, ...remembered.filter(entry => !previousKeys.has(entry.key))];
       for (const entry of candidates) {
         const id = identity(entry);
         if (!byText.has(id)) byText.set(id, []);
@@ -84,7 +97,15 @@
         const result = { ...entry, index, key: old?.key || `page-${++sequence}` };
         // Virtualized message text can return in a later frame. Retain its
         // identity without keeping detached DOM nodes alive.
-        if (result.scope) retained.set(result.key, { key: result.key, text: result.text, scope: result.scope });
+        if (result.scope) {
+          forget(result.key);
+          const remembered = { key: result.key, text: result.text, scope: result.scope };
+          retained.set(result.key, remembered);
+          if (!retainedByScope.has(result.scope)) retainedByScope.set(result.scope, new Map());
+          retainedByScope.get(result.scope).set(result.key, remembered);
+          retainedCharacters += result.text.length || 0;
+          while (retained.size > RETAINED_LIMIT || retainedCharacters > RETAINED_CHAR_LIMIT) forget(retained.keys().next().value);
+        }
         return result;
       });
     };
@@ -99,6 +120,36 @@
     const parsed = new URL(url);
     const chat = /^(chatgpt\.com|chat\.openai\.com)$/i.test(parsed.hostname);
     return `${parsed.origin}${parsed.pathname}${chat ? '' : parsed.search}`;
+  }
+
+  function mutationScopes(records, overlayRoot = null, readableRoot = null) {
+    const scopes = new Set();
+    let full = false;
+    if (!records || typeof records[Symbol.iterator] !== 'function') return { scopes, full: true };
+    const selector = '[data-testid^="conversation-turn-"], [data-message-id]';
+    const scopeForNode = node => node.closest?.('[data-testid^="conversation-turn-"]') || node.closest?.('[data-message-id]');
+    for (const record of records) {
+      const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
+      if (!target || overlayRoot?.contains?.(target)) continue;
+      if (readableRoot?.isConnected && !readableRoot.contains(target)) {
+        if (target.contains?.(readableRoot) && [...(record.removedNodes || [])].some(node => node.contains?.(readableRoot))) full = true;
+        continue;
+      }
+      const scope = scopeForNode(target);
+      if (scope) { scopes.add(scope); continue; }
+      let found = false;
+      for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
+        if (node === overlayRoot || node.nodeType !== 1) continue;
+        const ownScope = scopeForNode(node);
+        if (ownScope) { scopes.add(ownScope); found = true; }
+        else for (const child of node.querySelectorAll(selector)) {
+          scopes.add(scopeForNode(child));
+          found = true;
+        }
+      }
+      if (!found && readableRoot && !readableRoot.isConnected) full = true;
+    }
+    return { scopes, full };
   }
 
   function codePassages(text, chunksFor, limit = 1200) {
@@ -129,7 +180,7 @@
     return parts;
   }
 
-  const api = { textNoiseSelector, visibleBlock, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, codePassages };
+  const api = { textNoiseSelector, visibleBlock, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, mutationScopes, codePassages };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraPassages = api;
 })(globalThis);

@@ -201,3 +201,25 @@ test('normalization-equivalent live text edits refresh DOM offsets without inter
   assert.equal(range.startOffset, 6);
   assert.equal(range.endOffset, 10);
 });
+
+
+test('tracked DOM revisions avoid rescanning text nodes on every animation frame and code hit', () => {
+  const { document, tracker, highlights, makeNode } = domTrackerFixture();
+  const node = makeNode('Read this');
+  let raw = 'Read this', reads = 0;
+  Object.defineProperty(node.textNodes[0], 'data', { get() { reads++; return raw; } });
+  const entry = { node, text: 'Read this', domRevision: 1 };
+  const passage = { text: entry.text, blockOffset: 0 };
+  tracker.prepare(entry, passage, [{ start: 0, end: 1, textOffset: 5, length: 4 }]);
+  const preparedReads = reads;
+  for (let frame = 0; frame < 120; frame++) tracker.update(entry, .2, null);
+  assert.equal(reads, preparedReads);
+  const resolve = createRangeResolver(document);
+  resolve(entry, 5, 4);
+  const indexedReads = reads;
+  for (let move = 0; move < 120; move++) resolve(entry, 5, 4);
+  assert.equal(reads, indexedReads);
+  raw = 'Read  this'; entry.domRevision++;
+  tracker.update(entry, .3, null);
+  assert.equal([...highlights.get('sonora-current-word')][0].startOffset, 6);
+});

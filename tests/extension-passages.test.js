@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createReconciler, matchesPassage, pageIdentity, codePassages } = require('../extension/passages');
+const { createReconciler, matchesPassage, pageIdentity, mutationScopes, codePassages } = require('../extension/passages');
 const { chunksFor, cleanText } = require('../public/text');
 
 function entry(text, scope = 'message:answer-a', node = {}) { return { text, scope, node }; }
@@ -71,6 +71,25 @@ test('conversation navigation differs from ChatGPT model changes and heading anc
   assert.notEqual(pageIdentity('https://example.com/article?id=one'), pageIdentity('https://example.com/article?id=two'));
 });
 
+test('long ChatGPT mutation batches scope streaming work to the changed turn', () => {
+  const turns = Array.from({ length: 500 }, (_, index) => {
+    const turn = { id: index, closest(selector) { return selector.includes('conversation-turn') ? this : null; } };
+    turn.child = { closest: turn.closest.bind(turn), nodeType: 1 };
+    return turn;
+  });
+  const changed = turns[377].child;
+  const batch = mutationScopes([{ type: 'characterData', target: changed }]);
+  assert.equal(batch.full, false);
+  assert.deepEqual([...batch.scopes], [turns[377]]);
+  assert.equal(batch.scopes.size, 1);
+});
+
+test('navigation events are treated as a full refresh instead of iterated as mutations', () => {
+  const batch = mutationScopes(new Event('popstate'));
+  assert.equal(batch.full, true);
+  assert.equal(batch.scopes.size, 0);
+});
+
 test('code passages use complete lines and exact offsets through blank lines and repeated statements', () => {
   const text = cleanText('run init\n\nrun test --fast \\\n  --target "Example" \\\n  --limit 100\nrun init');
   const parts = codePassages(text, chunksFor);
@@ -92,4 +111,26 @@ test('oversized code lines stay within the model limit and preserve Unicode and 
   assert(parts.every(part => part.text.length <= 100 && part.text.isWellFormed()));
   for (const part of parts) assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
   assert.equal(parts.map(part => part.text).join('').replace(/\s/g, ''), text.replace(/\s/g, ''));
+});
+
+
+test('scoped reconciliation does not serialize unrelated retained code blocks', () => {
+  const reconcile = createReconciler();
+  const serialized = [];
+  const entries = Array.from({length: 500}, (_, at) => entry({ toJSON() { serialized.push(at); return 'Code in turn ' + at; } }, 'turn:' + at));
+  const before = reconcile([], entries);
+  serialized.length = 0;
+  reconcile([before[499]], [entries[499]]);
+  assert(serialized.length > 0);
+  assert(serialized.every(at => at === 499));
+});
+
+test('retained identities have a bound on both entry count and text size', () => {
+  const reconcile = createReconciler();
+  const old = reconcile([], [entry('old', 'turn:old')])[0];
+  for (let at = 0; at < 1250; at++) reconcile([], [entry('Small code block', 'turn:' + at)]);
+  assert.notEqual(reconcile([], [entry('old', 'turn:old')])[0].key, old.key);
+  const large = entry('code'.repeat(600000), 'turn:large');
+  const first = reconcile([], [large])[0];
+  assert.notEqual(reconcile([], [large])[0].key, first.key, 'oversized text must not be held in the identity cache');
 });

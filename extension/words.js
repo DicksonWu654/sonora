@@ -73,26 +73,38 @@
     const walker = document.createTreeWalker(node, 4); // SHOW_TEXT
     while (walker.nextNode()) {
       const child = walker.currentNode, parent = child.parentElement;
-      if (!parent || parent.closest('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],.sr-only,.visually-hidden')) continue;
+      if (!parent || parent.closest('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden')) continue;
       if (node.matches('li')) {
         const nestedList = parent.closest('ul,ol,menu');
         if (nestedList && node.contains(nestedList)) continue;
       }
       if (document.defaultView.getComputedStyle(parent).visibility === 'hidden') continue;
-      const range = document.createRange();
-      range.selectNodeContents(child);
-      if (![...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) continue;
+      let hidden = false;
+      for (let ancestor = parent; ancestor; ancestor = ancestor.parentElement) {
+        const style = document.defaultView.getComputedStyle(ancestor);
+        if (style.display === 'none' || style.visibility === 'collapse' || style.opacity === '0') { hidden = true; break; }
+        if (ancestor === node) break;
+      }
+      if (hidden) continue;
       segments.push({ node: child, value: child.data, start: text.length, end: text.length + child.data.length });
       text += child.data;
     }
-    return { ...compactMap(text), segments };
+    return { ...compactMap(text), segments, byNode: new Map(segments.map(segment => [segment.node, segment])) };
   }
 
   function domRange(index, span, document) {
     if (!span || !index.positions[span.start] || !index.positions[span.end - 1]) return null;
     const start = index.positions[span.start].start, end = index.positions[span.end - 1].end;
-    const first = index.segments.find(segment => start >= segment.start && start < segment.end);
-    const last = index.segments.find(segment => end > segment.start && end <= segment.end);
+    const segmentAt = (offset, endPoint = false) => {
+      let low = 0, high = index.segments.length;
+      while (low < high) {
+        const middle = (low + high) >> 1, segment = index.segments[middle];
+        if (endPoint ? segment.end < offset : segment.end <= offset) low = middle + 1;
+        else high = middle;
+      }
+      return index.segments[low];
+    };
+    const first = segmentAt(start), last = segmentAt(end, true);
     if (!first?.node.isConnected || !last?.node.isConnected) return null;
     try {
       const range = document.createRange();
@@ -104,18 +116,45 @@
 
   function createRangeResolver(document) {
     const cache = new WeakMap();
-    return (entry, start, length) => {
+    function indexed(entry) {
       const node = entry?.contentNode || entry?.node;
       if (!node?.isConnected) return null;
       let saved = cache.get(node);
-      if (!saved || saved.text !== entry.text || saved.index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value)) {
+      const stale = saved && (entry.domRevision === undefined
+        ? saved.index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value)
+        : saved.revision !== entry.domRevision);
+      if (!saved || saved.text !== entry.text || stale) {
         const index = domIndex(node, document), source = compactMap(entry.text);
-        saved = { text: entry.text, index, source, base: index.text.indexOf(source.text) };
+        saved = { text: entry.text, revision: entry.domRevision, index, source, base: index.text.indexOf(source.text) };
         cache.set(node, saved);
       }
+      return saved;
+    }
+    const resolve = (entry, start, length) => {
+      const saved = indexed(entry);
+      if (!saved) return null;
       const span = compactSpan(saved.source, start, length);
       return span && saved.base >= 0 ? domRange(saved.index, { start: saved.base + span.start, end: saved.base + span.end }, document) : null;
     };
+    resolve.offsetAt = (entry, x, y) => {
+      const caret = document.caretPositionFromPoint?.(x, y);
+      const range = caret ? null : document.caretRangeFromPoint?.(x, y);
+      const node = caret?.offsetNode || range?.startContainer;
+      const offset = caret?.offset ?? range?.startOffset;
+      if (!node || !(entry.contentNode || entry.node).contains(node)) return null;
+      const saved = indexed(entry), segment = saved?.index.byNode.get(node);
+      if (!segment || saved.base < 0) return null;
+      const raw = segment.start + offset;
+      let low = 0, high = saved.index.positions.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (saved.index.positions[middle].end <= raw) low = middle + 1;
+        else high = middle;
+      }
+      const at = Math.max(0, low - saved.base);
+      return saved.source.positions[at]?.start ?? entry.text.length;
+    };
+    return resolve;
   }
 
   function docsRects(entry, span, surface, context) {
@@ -153,7 +192,7 @@
   }
 
   function createTracker(document, container) {
-    let words = [], spans = [], item = null, index = null, indexedNode = null, sourceText = '', sourceCompact = '', sourceBase = -1, current = -1;
+    let words = [], spans = [], item = null, index = null, indexedNode = null, sourceText = '', sourceCompact = '', sourceBase = -1, current = -1, indexedRevision;
     const boxes = [];
     const context = document.createElement('canvas').getContext('2d');
     const window = document.defaultView;
@@ -202,6 +241,7 @@
       if (!entry.rects && entry.node?.isConnected) {
         index = domIndex(entry.contentNode || entry.node, document);
         indexedNode = entry.contentNode || entry.node;
+        indexedRevision = entry.domRevision;
         sourceBase = index.text.indexOf(source.text);
       }
     }
@@ -216,9 +256,10 @@
         index = null;
         current = -1;
       }
-      if (!entry.rects && entry.node?.isConnected && (!index || (entry.contentNode || entry.node) !== indexedNode || index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value))) {
+      if (!entry.rects && entry.node?.isConnected && (!index || (entry.contentNode || entry.node) !== indexedNode || (entry.domRevision === undefined ? index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value) : indexedRevision !== entry.domRevision))) {
         index = domIndex(entry.contentNode || entry.node, document);
         indexedNode = entry.contentNode || entry.node;
+        indexedRevision = entry.domRevision;
         sourceBase = index.text.indexOf(sourceCompact);
         current = -1;
       }
