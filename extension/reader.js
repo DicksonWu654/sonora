@@ -7,12 +7,7 @@ els.audio.preservesPitch = true;
 
 function setStatus(message, mode = '') { els.status.textContent = message; els.dot.className = `status-dot ${mode}`; }
 function splitText(value) {
-  const normalized = window.BookText.cleanText(value);
-  if (!normalized) return [];
-  const first = window.BookText.chunksFor(normalized, 700)[0];
-  if (!first || normalized.length <= first.length) return first ? [first] : [];
-  const rest = normalized.slice(normalized.indexOf(first) + first.length).trim();
-  return [first, ...window.BookText.chunksFor(rest, 3600)];
+  return window.BookText.openingChunksFor(value);
 }
 function displaySelection(selection) {
   state.text = typeof selection?.text === 'string' ? selection.text.trim() : '';
@@ -71,7 +66,7 @@ async function checkVoice() {
     } else {
       setStatus(data.state === 'loading' ? 'Warming up the local voice…' : (data.message || 'Start the Sonora server to continue.'), data.state === 'loading' ? 'busy' : 'error');
       if (state.checkTimer) clearTimeout(state.checkTimer);
-      state.checkTimer = setTimeout(() => { state.checkTimer = null; checkVoice(); }, data.state === 'loading' ? 2500 : 5000);
+      state.checkTimer = setTimeout(() => { state.checkTimer = null; checkVoice(); }, data.state === 'loading' ? 200 : 5000);
     }
     els.play.disabled = !state.chunks.length || !state.ready;
   } catch (error) {

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const http = require('node:http');
-const { createSupervisor } = require('../tools/supervisor');
+const { createSupervisor, DEFAULT_IDLE_MS } = require('../tools/supervisor');
 
 function json(res, status, body) {
   const data = JSON.stringify(body);
@@ -88,4 +88,55 @@ test('supervisor starts on demand, proxies requests, and preserves active book j
   assert.equal(supervisor.state().backendRunning, false);
   assert.equal(starts, 1);
   await supervisor.close();
+});
+
+
+test('the one-hour idle default remains configurable', async () => {
+  assert.equal(DEFAULT_IDLE_MS, 3600000);
+  const supervisor = createSupervisor({port: 0, backendPort: 12345, idleMs: 1234});
+  assert.equal(supervisor.state().idleMs, 1234);
+  await supervisor.close();
+});
+
+
+test('disconnecting a reader cancels a proxied render even after its request body was sent', async t => {
+  let renderStarted, renderClosed;
+  const started = new Promise(resolve => { renderStarted = resolve; });
+  const closed = new Promise(resolve => { renderClosed = resolve; });
+  const backendServer = http.createServer((req, res) => {
+    if (req.url === '/api/narration/status') return json(res, 200, {ready: true});
+    if (req.url === '/api/narration/render') {
+      req.resume();
+      req.on('end', renderStarted);
+      res.on('close', renderClosed);
+    }
+  });
+  await new Promise(resolve => backendServer.listen(0, '127.0.0.1', resolve));
+  const supervisor = createSupervisor({port: 0, backendPort: backendServer.address().port, spawnBackend: () => fakeChild(() => {})});
+  await supervisor.listen();
+  t.after(async () => { await supervisor.close(); backendServer.closeAllConnections(); await new Promise(resolve => backendServer.close(resolve)); });
+  const controller = new AbortController();
+  const request = fetch(`http://127.0.0.1:${supervisor.address().port}/api/narration/render`, {method: 'POST', body: '{}', signal: controller.signal});
+  const cancelled = assert.rejects(request, /stopped/);
+  await started;
+  controller.abort(new Error('reader stopped'));
+  await cancelled;
+  await Promise.race([closed, new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('Upstream render was not cancelled')), 1000); timer.unref(); })]);
+  await waitFor(() => supervisor.state().activeRequests === 0);
+});
+
+
+test('parallel prewarm and overlay requests both await the same backend startup', async t => {
+  let releaseStatus, starts = 0;
+  const backendServer = http.createServer((req, res) => { releaseStatus = () => json(res, 200, {ready: false, state: 'loading'}); });
+  await new Promise(resolve => backendServer.listen(0, '127.0.0.1', resolve));
+  const supervisor = createSupervisor({port: 0, backendPort: backendServer.address().port, spawnBackend: () => { starts++; return fakeChild(() => {}); }});
+  t.after(async () => { await supervisor.close(); backendServer.closeAllConnections(); await new Promise(resolve => backendServer.close(resolve)); });
+  const first = supervisor.ensureBackend();
+  let secondFinished = false;
+  const second = supervisor.ensureBackend().then(() => { secondFinished = true; });
+  await waitFor(() => Boolean(releaseStatus));
+  assert.equal(secondFinished, false, 'a spawned child is not necessarily listening yet');
+  releaseStatus(); await Promise.all([first, second]);
+  assert.equal(starts, 1);
 });

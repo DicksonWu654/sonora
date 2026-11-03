@@ -5,9 +5,9 @@ const {spawn} = require('child_process');
 const readline = require('readline');
 const config = require('./config');
 
-function createNarrationBackend({authorize} = {}) {
+function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
   let worker = null, state = 'not-installed', serial = 0, startupTimer, activeJob = null;
-  const pending = new Map(), inflight = new Map();
+  const pending = new Map(), inflight = new Map(), readyWaiters = new Set();
   const installed = () => fs.existsSync(config.python) && ['config.json','kokoro-v1_0.pth','voices/af_heart.pt','voices/af_bella.pt'].every(f=>fs.existsSync(path.join(config.modelDir,f)));
   function start() {
     if (worker || !installed()) return;
@@ -18,7 +18,7 @@ function createNarrationBackend({authorize} = {}) {
     const lines = readline.createInterface({input:worker.stdout});
     lines.on('line',line=>{
       let event; try { event=JSON.parse(line); } catch { return; }
-      if(event.event === 'ready') {state='ready';clearTimeout(startupTimer);return;}
+      if(event.event === 'ready') {state='ready';clearTimeout(startupTimer);for(const waiter of readyWaiters)waiter.finish();return;}
       const job = pending.get(event.id);
       if(!job) return;
       pending.delete(event.id); clearTimeout(job.timer);
@@ -32,6 +32,7 @@ function createNarrationBackend({authorize} = {}) {
       state='error';worker=null;clearTimeout(startupTimer);
       for(const job of pending.values()) {clearTimeout(job.timer);job.reject(Object.assign(new Error('Local voice stopped; the saved job can be retried.'),{status:503}));}
       pending.clear();activeJob=null;
+      for(const waiter of readyWaiters)waiter.finish(Object.assign(new Error('Local voice stopped while warming up.'),{status:503}));
     };
     worker.on('error',fail);worker.on('exit',fail);
     worker.stdin.on('error',()=>{});
@@ -78,6 +79,23 @@ function createNarrationBackend({authorize} = {}) {
     job.timer=setTimeout(()=>{if(pending.has(job.id))worker?.kill();},180000);
     worker.stdin.write(JSON.stringify({id:job.id,text:job.text,voice:job.voice})+'\n');
   }
+  function waitForReady(signal) {
+    signal?.throwIfAborted();
+    if(state === 'ready')return Promise.resolve();
+    if(state !== 'loading')return Promise.reject(Object.assign(new Error(!installed()?'Install the local voice with npm run voice:setup.':'The local voice could not start. Please try again.'),{status:503}));
+    if(readyWaiters.size >= 6)return Promise.reject(Object.assign(new Error('The local voice queue is full. Please wait for the current passage.'),{status:429}));
+    return new Promise((resolve,reject)=>{
+      const waiter={finish(error) {
+        clearTimeout(timer);signal?.removeEventListener('abort',abort);readyWaiters.delete(waiter);
+        error ? reject(error) : resolve();
+      }};
+      const abort=()=>waiter.finish(signal.reason || new Error('Narration cancelled.'));
+      const timer=setTimeout(()=>waiter.finish(Object.assign(new Error('The local voice did not become ready in time. Please try again.'),{status:503})),readyTimeoutMs);
+      readyWaiters.add(waiter);
+      signal?.addEventListener('abort',abort,{once:true});
+      if(signal?.aborted)abort();
+    });
+  }
   async function generate(text,voice,{signal} = {}) {
     signal?.throwIfAborted();
     const key=keyFor(text,voice);
@@ -85,7 +103,8 @@ function createNarrationBackend({authorize} = {}) {
     signal?.throwIfAborted();
     if(cached)return cached;
     if(!worker && installed()) start();
-    if(state !== 'ready') throw Object.assign(new Error(!installed()?'Install the local voice with npm run voice:setup.':'The local voice is still warming up. Please try again in a moment.'),{status:503});
+    await waitForReady(signal);
+    signal?.throwIfAborted();
     let job=inflight.get(key);
     if(!job) {
       if(pending.size >= 6) throw Object.assign(new Error('The local voice queue is full. Please wait for the current passage.'),{status:429});

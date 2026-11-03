@@ -67,6 +67,8 @@ async function injectReader(tabId) {
 
 async function injectSafely(tab) {
   if (!tab || typeof tab.id !== 'number') return;
+  // Do not wait for injection or page indexing to begin loading the voice.
+  prewarmVoice();
   try {
     await injectReader(tab.id);
   } catch (error) {
@@ -88,6 +90,18 @@ async function serverUrl() {
   } catch {
     return validation.DEFAULT_SERVER;
   }
+}
+
+async function prewarmVoice() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const base = await serverUrl();
+    controller.signal.throwIfAborted();
+    const response = await fetch(`${base}/api/narration/status`, { signal: controller.signal });
+    await response.json();
+  } catch { /* The overlay reports connection errors and retries without delaying injection. */ }
+  finally { clearTimeout(timer); }
 }
 
 function base64FromBuffer(buffer) {
@@ -142,7 +156,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const response = await fetch(`${base}/api/narration/${message.type === 'sonora-render' ? 'render' : 'status'}`, options);
     let data; try { data = await response.json(); } catch (error) { controller.signal.throwIfAborted(); data = {}; }
     if (!response.ok) throw new Error(data.error || `Sonora returned ${response.status}.`);
-    if (message.type === 'sonora-render') await pageAudioSource(base, data, controller.signal);
+    if (message.type === 'sonora-render') {
+      // Metadata means inference is finished; let the next inference overlap
+      // this passage's WAV transfer, base64 conversion and browser decoding.
+      if (sender.tab?.id !== undefined) {
+        const target = sender.documentId ? { documentId: sender.documentId } : { frameId: sender.frameId || 0 };
+        chrome.tabs?.sendMessage(sender.tab.id, { type: 'sonora-render-ready', requestId: message.requestId }, target)?.catch?.(() => {});
+      }
+      await pageAudioSource(base, data, controller.signal);
+    }
     controller.signal.throwIfAborted();
     sendResponse({ ok: true, data });
   })().catch(error => sendResponse({ ok: false, error: controller.signal.reason?.message || error?.message || 'Sonora could not complete the request.' }))

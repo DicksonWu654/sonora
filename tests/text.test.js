@@ -35,3 +35,49 @@ test('import artifacts are removed while dialogue and short paragraphs survive',
 test('invalid limits fail instead of looping forever', () => {
   assert.throws(() => chunksFor('Hello', 0));
 });
+
+test('interactive openings prefer the first sentence, cap long sentences, and keep every word at the seam', () => {
+  const { openingChunksFor } = require('../public/text');
+  const fixtures = [
+    'A short first sentence. ' + 'The normal remainder continues here. '.repeat(90),
+    Array.from({ length: 65 }, (_, at) => `word${at}`).join(' ') + '. Next sentence.',
+    Array.from({ length: 65 }, (_, at) => `word${at}`).join(' '),
+    'A repeated phrase. A repeated phrase. A repeated phrase.',
+    'First line without punctuation\nNext line with combining cafe\u0301 and 😀 emoji',
+    'x'.repeat(4000) + '😀'.repeat(1200)
+  ];
+  for (const text of fixtures) {
+    const normalized = cleanText(text), pieces = openingChunksFor(text);
+    assert(pieces[0].split(/\s+/).length <= 25);
+    assert(pieces.every(piece => piece.length <= 1200 && piece.isWellFormed()));
+    assert.equal(pieces.join('').replace(/\s/g, ''), normalized.replace(/\s/g, ''));
+    let offset = 0;
+    for (const piece of pieces) {
+      const at = normalized.indexOf(piece, offset);
+      assert(at >= offset);
+      assert.equal(normalized.slice(offset, at).trim(), '');
+      offset = at + piece.length;
+    }
+    assert.equal(normalized.slice(offset).trim(), '');
+  }
+  assert.equal(openingChunksFor(fixtures[0])[0], 'A short first sentence.');
+  assert.equal(openingChunksFor(fixtures[1])[0].split(/\s+/).length, 25);
+  assert.equal(openingChunksFor(fixtures[2])[0].split(/\s+/).length, 20);
+  assert.deepEqual(openingChunksFor(''), []);
+  assert.throws(() => openingChunksFor('Text', 0), /Invalid passage limit/);
+});
+
+test('a short opening inside a long code line preserves code passage offsets and following lines', () => {
+  const { openingChunksFor } = require('../public/text');
+  const { codePassages } = require('../extension/passages');
+  const { chunkOffsets } = require('../extension/words');
+  const text = cleanText('{\nconst values = [' + Array.from({ length: 90 }, (_, at) => `value${at},`).join(' ') + '];\nreturn values;\n}\nreturn values;');
+  const parts = codePassages(text, chunksFor);
+  const first = parts.shift(), opening = openingChunksFor(first.text);
+  const offsets = chunkOffsets(first.text, opening);
+  const queue = [...opening.map((text, at) => ({ text, offset: first.offset + offsets[at] })), ...parts];
+  assert(queue[0].text.split(/\s+/).length <= 25);
+  assert.equal(queue.map(part => part.text).join('').replace(/\s/g, ''), text.replace(/\s/g, ''));
+  for (const part of queue) assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
+  assert.equal(queue.at(-1).text, 'return values;');
+});

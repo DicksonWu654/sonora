@@ -176,6 +176,15 @@ def render(text, voice):
     temporary_metadata.replace(metadata_file)
     return result
 
+def warm_up():
+    # Exercise the actual inference path on every process start, even if an
+    # earlier process cached this phrase. Nothing is played or written to disk.
+    tokens, _ = prepare_tokens('Ready.')
+    with torch.inference_mode():
+        for result in pipeline.generate_from_tokens(tokens, voice='af_heart', speed=1):
+            result.audio.detach().cpu().numpy()  # Wait for CUDA before declaring readiness.
+
+warm_up()
 emit({'event':'ready'})
 for line in sys.stdin:
     request = {}

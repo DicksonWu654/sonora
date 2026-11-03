@@ -7,7 +7,7 @@ const serverPath = path.join(root, 'server.js');
 const LOOPBACK = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const DEFAULT_BACKEND_PORT = 8788;
-const DEFAULT_IDLE_MS = 5 * 60 * 1000;
+const DEFAULT_IDLE_MS = 60 * 60 * 1000;
 const DEFAULT_ACTIVE_JOB_CHECK_MS = 30 * 1000;
 const ACTIVE_JOB_STATES = new Set(['queued', 'rendering', 'encoding']);
 
@@ -99,8 +99,8 @@ function createSupervisor(options = {}) {
 
   async function ensureBackend() {
     if (stoppingPromise) await stoppingPromise;
-    if (backend && backend.exitCode == null && !backend.killed) return;
     if (startPromise) return startPromise;
+    if (backend && backend.exitCode == null && !backend.killed) return;
 
     const child = spawnBackend(backendPort);
     backend = child;
@@ -197,18 +197,32 @@ function createSupervisor(options = {}) {
   function forward(req, res) {
     return new Promise(resolve => {
       const headers = { ...req.headers, host: req.headers.host || `${host}:${port}` };
+      const finish = () => {
+        res.off('close', disconnect);
+        req.off('aborted', disconnect);
+        resolve();
+      };
+      const disconnect = () => {
+        if (!res.writableEnded) request.destroy();
+        finish();
+      };
       const request = http.request({ host: LOOPBACK, port: backendPort, method: req.method, path: req.url, headers }, response => {
         res.writeHead(response.statusCode || 502, response.headers);
         response.pipe(res);
-        response.on('end', resolve);
+        response.on('end', finish);
+        response.on('error', () => { res.destroy(); finish(); });
       });
       request.on('error', error => {
-        if (!res.headersSent) json(res, 503, { error: 'Sonora is starting. Try again in a moment.' });
-        else res.destroy();
-        resolve();
-        console.error(`Sonora proxy: ${error.message}`);
+        if (!res.destroyed) {
+          if (!res.headersSent) json(res, 503, { error: 'Sonora is starting. Try again in a moment.' });
+          else res.destroy();
+          console.error(`Sonora proxy: ${error.message}`);
+        }
+        finish();
       });
-      req.on('aborted', () => request.destroy());
+      res.on('close', disconnect);
+      req.on('aborted', disconnect);
+      if (res.destroyed) { disconnect(); return; }
       req.pipe(request);
     });
   }

@@ -12,7 +12,7 @@ async function install(page, savedSpeed = 1.25) {
     const attach = Element.prototype.attachShadow;
     Element.prototype.attachShadow = function (options) { const shadow = attach.call(this, options); if (this.id === 'sonora-overlay-root') window.panel = shadow; return shadow; };
     window.messages = []; window.saved = { sonoraSpeed: ${savedSpeed} }; window.pending = new Map();
-    window.chrome = { storage: { local: { get: async () => saved, set: async value => Object.assign(saved, value) } }, runtime: { sendMessage(message, callback) {
+    window.chrome = { storage: { local: { get: async () => saved, set: async value => Object.assign(saved, value) } }, runtime: { onMessage: { addListener(listener) { window.renderReady = listener; }, removeListener() { window.renderReady = null; } }, sendMessage(message, callback) {
       messages.push(message);
       if (message.type === 'sonora-status') callback({ ok: true, data: { ready: true } });
       else if (message.type === 'sonora-cancel-render') { pending.get(message.requestId)?.({ ok: false, error: 'cancelled' }); pending.delete(message.requestId); callback({ ok: true }); }
@@ -146,5 +146,26 @@ test('nested generic wrappers produce clickable passages and hide transparent de
   await install(page);
   const texts = await page.evaluate(`[...document.querySelectorAll('.sonora-readable-block')].map(node => SonoraPassages.readableText(node, BookText.cleanText))`);
   assert.deepEqual(texts, ['Visible article text', 'Mixed inline wrapper', 'Visible prose']);
+  assert.deepEqual(page.errors, []);
+});
+
+
+test('a short opening preserves its remainder and prefetches it before the first audio response', async t => {
+  const text = Array.from({length: 70}, (_, at) => 'word' + at).join(' ') + '. Following sentence.';
+  const page = await browser(t, '<main><p>' + text + '</p></main>');
+  if (!page) return;
+  await install(page);
+  const requests = await page.evaluate(`(() => {
+    document.querySelector('p').click();
+    const first = messages.find(item => item.type === 'sonora-render');
+    renderReady({ type: 'sonora-render-ready', requestId: first.requestId });
+    return messages.filter(item => item.type === 'sonora-render').map(item => item.text);
+  })()`);
+  assert.equal(requests[0].split(/\s+/).length, 25);
+  assert.equal(requests.join(' '), text);
+  assert.equal(await page.evaluate('audioStarts.length'), 0);
+  assert.equal(await page.evaluate('pending.size'), 2, 'only current and next renders may be pending');
+  await page.evaluate(`panel.querySelector('.stop').click()`);
+  assert.equal(await page.evaluate('pending.size'), 0);
   assert.deepEqual(page.errors, []);
 });

@@ -32,7 +32,30 @@
     if (rest) pieces.push(rest);
     return pieces;
   }
-  const api = { cleanText, chunksFor };
+  // Interactive playback gets a short opening without changing durable book chunks.
+  function openingChunksFor(text, limit = 1200) {
+    if (!Number.isInteger(limit) || limit < 32) throw new Error('Invalid passage limit.');
+    const normalized = cleanText(text);
+    if (!normalized) return [];
+    let end = Math.min(limit, normalized.length);
+    if (/[\ud800-\udbff]/.test(normalized[end - 1])) end--;
+    const head = normalized.slice(0, end);
+    const sentence = /[.!?…]["'”’)\]]*(?=\s|$)/u.exec(head);
+    let cut = sentence ? sentence.index + sentence[0].length : end;
+    const wordLimit = sentence ? 25 : 20;
+    let words = 0;
+    for (const word of head.matchAll(/\S+/gu)) {
+      if (++words === wordLimit) { cut = Math.min(cut, word.index + word[0].length); break; }
+    }
+    // With fewer words and a hard character limit, prefer an intact last word.
+    if (end < normalized.length && !/\s/u.test(normalized[end]) && cut === end) {
+      const boundary = head.search(/\s+\S*$/u);
+      if (boundary > 0) cut = boundary;
+    }
+    const opening = normalized.slice(0, cut).trimEnd();
+    return [opening, ...chunksFor(normalized.slice(opening.length), limit)];
+  }
+  const api = { cleanText, chunksFor, openingChunksFor };
   if (typeof module !== 'undefined') module.exports = api;
   else root.BookText = api;
 })(globalThis);

@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.3';
+  const OVERLAY_VERSION = '0.4.4';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -10,6 +10,9 @@
     delete window.__sonoraOverlay;
   }
 
+  // Start the local voice before any synchronous page discovery.
+  let initialStatus = message({ type: 'sonora-status' });
+  initialStatus.catch(() => {});
   const { cleanText, chunksFor } = window.BookText;
   const speed = window.SonoraSpeed;
   const MAX_PAGE_CHARS = 240000;
@@ -439,7 +442,7 @@
     state.audioObjectUrl = objectUrl;
     return objectUrl;
   }
-  function queueFrom(blockIndex = 0, limit = MAX_PAGE_CHARS, blockOffset = 0) {
+  function queueFrom(blockIndex = 0, limit = MAX_PAGE_CHARS, blockOffset = 0, shortOpening = false) {
     ensureOrderedEntries();
     const queue = [];
     let remaining = limit;
@@ -453,6 +456,12 @@
       chunks.filter(part => entry.index !== blockIndex || part.offset >= blockOffset)
         .forEach(part => queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset }));
       remaining -= blockText.length;
+    }
+    if (shortOpening && queue.length) {
+      const first = queue[0];
+      const pieces = window.BookText.openingChunksFor(first.text);
+      const offsets = window.SonoraWords.chunkOffsets(first.text, pieces);
+      queue.splice(0, 1, ...pieces.map((text, index) => ({ ...first, text, blockOffset: first.blockOffset + offsets[index] })));
     }
     return queue;
   }
@@ -468,6 +477,12 @@
       .finally(() => { if (state.renderRequests.get(index) === requestId) state.renderRequests.delete(index); });
     return promise;
   }
+  const renderReadyListener = payload => {
+    if (state.closed || payload?.type !== 'sonora-render-ready') return;
+    if (state.renderRequests.get(state.index) !== payload.requestId) return;
+    if (state.index + 1 < state.queue.length) render(state.index + 1).catch(() => {});
+  };
+  chrome.runtime.onMessage?.addListener(renderReadyListener);
   function cancelRender(index) {
     const requestId = state.renderRequests.get(index);
     if (!requestId) return;
@@ -552,7 +567,7 @@
   function startQueue(blockIndex = 0, blockOffset = 0) {
     const selected = state.queue[state.index];
     if (state.pendingRender && selected?.blockKey === blockEntries[blockIndex]?.key && selected.blockOffset === blockOffset) return;
-    const queue = queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset);
+    const queue = queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset, true);
     if (!queue.length) {
       setStatus(isGoogleDocsPage() ? readyMessage() : 'No readable text was found in that block.', 'error');
       return;
@@ -607,7 +622,9 @@
     if (state.closed) return;
     if (state.voiceTimer) { clearTimeout(state.voiceTimer); state.voiceTimer = null; }
     try {
-      const data = await message({ type: 'sonora-status' });
+      const request = initialStatus || message({ type: 'sonora-status' });
+      initialStatus = null;
+      const data = await request;
       if (state.closed) return;
       state.ready = Boolean(data.ready);
       if (data.ready) {
@@ -619,7 +636,7 @@
         }
       } else if (data.state === 'loading') {
         setStatus('Warming up the local voice…', 'busy');
-        state.voiceTimer = setTimeout(() => { state.voiceTimer = null; checkVoice(); }, 2500);
+        state.voiceTimer = setTimeout(() => { state.voiceTimer = null; checkVoice(); }, 200);
       } else {
         setStatus(data.message || 'Start the Sonora supervisor.', 'error');
         // Keep checking so installing or restarting the local model takes
@@ -997,6 +1014,7 @@
     state.audioContext = null;
     releaseAudioObjectUrl();
     pageObserver.disconnect();
+    chrome.runtime.onMessage?.removeListener(renderReadyListener);
     document.removeEventListener('click', pageClickListener, true);
     document.removeEventListener('pointerdown', docsPointerDownListener, true);
     document.removeEventListener('pointermove', docsPointerListener, true);
