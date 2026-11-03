@@ -126,7 +126,6 @@
     const scopes = new Set();
     let full = false;
     if (!records || typeof records[Symbol.iterator] !== 'function') return { scopes, full: true };
-    const selector = '[data-testid^="conversation-turn-"], [data-message-id]';
     const scopeForNode = node => node.closest?.('[data-testid^="conversation-turn-"]') || node.closest?.('[data-message-id]');
     for (const record of records) {
       const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
@@ -137,17 +136,17 @@
       }
       const scope = scopeForNode(target);
       if (scope) { scopes.add(scope); continue; }
-      let found = false;
+      let changed = false;
       for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
-        if (node === overlayRoot || node.nodeType !== 1) continue;
+        if (node === overlayRoot) continue;
+        changed = true;
+        if (node.nodeType !== 1) { full = true; continue; }
         const ownScope = scopeForNode(node);
-        if (ownScope) { scopes.add(ownScope); found = true; }
-        else for (const child of node.querySelectorAll(selector)) {
-          scopes.add(scopeForNode(child));
-          found = true;
-        }
+        if (ownScope) scopes.add(ownScope);
+        else full = true; // Initial discovery also accepts prose outside turns.
       }
-      if (!found && readableRoot && !readableRoot.isConnected) full = true;
+      if (!changed && record.type !== 'childList') full = true;
+      if (readableRoot && !readableRoot.isConnected) full = true;
     }
     return { scopes, full };
   }

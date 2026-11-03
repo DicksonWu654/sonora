@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.4';
+  const OVERLAY_VERSION = '0.4.5';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -818,7 +818,8 @@
     updateBlocks(nextBlocks, navigated);
   }
   function scheduleBlockRefresh(records) {
-    if (records && typeof records[Symbol.iterator] === 'function' && isChatGPTPage()) {
+    const mutations = records && typeof records[Symbol.iterator] === 'function';
+    if (mutations) {
       for (const record of records) {
         let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
         while (node && source.root?.contains(node)) {
@@ -826,9 +827,25 @@
           if (node === source.root) break;
           node = node.parentElement;
         }
+        // Detached edits are not observed. Rediscover inserted subtrees from
+        // their live text, including blocks excluded by an earlier extraction.
+        for (const added of record.addedNodes || []) {
+          if (added.nodeType !== Node.ELEMENT_NODE) continue;
+          dirtyTextNodes.add(added);
+          const walker = document.createTreeWalker(added, 1); // SHOW_ELEMENT
+          while (walker.nextNode()) dirtyTextNodes.add(walker.currentNode);
+        }
       }
+    }
+    if (mutations && isChatGPTPage()) {
       const batch = window.SonoraPassages.mutationScopes(records, root, source.root);
-      batch.scopes.forEach(scopeNode => dirtyScopes.set(window.SonoraPassages.scopeFor(scopeNode), scopeNode));
+      batch.scopes.forEach(scopeNode => {
+        const key = window.SonoraPassages.scopeFor(scopeNode);
+        const previous = dirtyScopes.get(key);
+        // Replacement records list both nodes. A removed copy must not hide
+        // the live turn, including across observer batches before the flush.
+        if (!previous || !source.root?.contains(previous) || source.root.contains(scopeNode)) dirtyScopes.set(key, scopeNode);
+      });
       fullRefreshPending ||= batch.full;
       if (!dirtyScopes.size && !fullRefreshPending && sourceUrl === location.href) return;
     } else fullRefreshPending = true;

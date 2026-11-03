@@ -11,7 +11,7 @@ function backend(t, { ready = true, readyTimeoutMs = 120000 } = {}) {
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new EventEmitter();
   child.stdin.write = value => requests.push(JSON.parse(value));
   child.kill = () => child.emit('exit', 0);
-  const context = { __dirname, module: { exports: {} }, setTimeout, clearTimeout, Buffer, process, require(name) {
+  const context = { __dirname, module: { exports: {} }, setTimeout, clearTimeout, Buffer, URL, AbortController, process, require(name) {
     if (name === './config') return { python: 'fixture', modelDir: '/fixture', cacheDir: '/fixture', voices: [{ id: 'af_heart' }] };
     if (name === 'fs') return { existsSync: () => true, promises: { readFile: async () => { throw new Error('no cache'); } } };
     if (name === 'child_process') return { spawn: () => child };
@@ -93,4 +93,43 @@ test('waiting for readiness supports cancellation, a deadline and worker failure
   const failed = backend(t, { ready: false });
   const rejected = assert.rejects(failed.narration.generate('Worker fails during loading', 'af_heart'), /stopped while warming up/);
   await tick(); failed.child.emit('exit', 1); await rejected;
+});
+
+test('supervisor cancellation drops a queued render before the worker sees it', {timeout: 5000}, async t => {
+  const http = require('node:http');
+  const { createSupervisor } = require('../tools/supervisor');
+  const { narration, requests, complete } = backend(t);
+  let bodyReceived = false, responseClosed = false;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/narration/render') {
+      req.once('end', () => { bodyReceived = true; });
+      res.once('close', () => { responseClosed = true; });
+    }
+    narration.handle(req, res, req.url);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const child = new EventEmitter(); child.exitCode = null; child.killed = false;
+  child.kill = () => { child.exitCode = 0; child.killed = true; child.emit('exit', 0); };
+  const supervisor = createSupervisor({port: 0, backendPort: server.address().port, spawnBackend: () => child});
+  await supervisor.listen();
+  t.after(async () => { await supervisor.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const active = narration.generate('Active inference.', 'af_heart');
+  await tick();
+  const controller = new AbortController();
+  const queued = fetch(`http://127.0.0.1:${supervisor.address().port}/api/narration/render`, {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({text: 'Cancelled queued passage.', voice: 'af_heart'}), signal: controller.signal
+  });
+  const cancelled = assert.rejects(queued, /reader stopped/);
+  for (let attempt = 0; !bodyReceived && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert(bodyReceived, 'the POST body must reach the real backend before cancelling');
+  await tick(); await tick();
+  controller.abort(new Error('reader stopped')); await cancelled;
+  for (let attempt = 0; !responseClosed && attempt < 40; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  complete(requests[0]); await active;
+  await tick(); await tick();
+  const spoken = requests.map(request => request.text);
+  // Finish a wrongly dispatched request as well, so a failing reproduction cleans up.
+  if (requests[1]) { complete(requests[1]); await tick(); }
+  assert.deepEqual(spoken, ['Active inference.']);
 });

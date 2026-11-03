@@ -29,11 +29,16 @@ async function browser(t, html, url = 'https://chatgpt.com/c/synthetic') {
     fs.rmSync(profile, { recursive: true, force: true });
   });
   const portFile = path.join(profile, 'DevToolsActivePort');
-  for (let attempt = 0; !fs.existsSync(portFile); attempt++) {
+  let port;
+  for (let attempt = 0; !port; attempt++) {
     if (attempt > 150 || child.exitCode !== null) throw new Error('Chromium did not start.');
-    await new Promise(resolve => setTimeout(resolve, 20));
+    if (fs.existsSync(portFile)) {
+      // Chrome creates the file before writing its port and browser endpoint.
+      const [candidate, endpoint] = fs.readFileSync(portFile, 'utf8').split('\n');
+      if (/^\d+$/.test(candidate) && Number(candidate) > 0 && Number(candidate) <= 65535 && endpoint?.startsWith('/devtools/browser/')) port = candidate;
+    }
+    if (!port) await new Promise(resolve => setTimeout(resolve, 20));
   }
-  const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
   const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
   const socket = new WebSocket(targets.find(target => target.type === 'page').webSocketDebuggerUrl);
   await once(socket, 'open');

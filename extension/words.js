@@ -89,7 +89,7 @@
       segments.push({ node: child, value: child.data, start: text.length, end: text.length + child.data.length });
       text += child.data;
     }
-    return { ...compactMap(text), segments, byNode: new Map(segments.map(segment => [segment.node, segment])) };
+    return { ...compactMap(text), rawText: text, segments, byNode: new Map(segments.map(segment => [segment.node, segment])) };
   }
 
   function domRange(index, span, document) {
@@ -151,6 +151,10 @@
         if (saved.index.positions[middle].end <= raw) low = middle + 1;
         else high = middle;
       }
+      // An end-of-line caret is before the newline that compactMap removes.
+      // Keep that line; indentation after a newline belongs to the next line.
+      const previous = saved.index.positions[low - 1], next = saved.index.positions[low];
+      if (previous && (!next || raw < next.start) && !/[\r\n]/.test(saved.index.rawText.slice(previous.end, raw))) low--;
       const at = Math.max(0, low - saved.base);
       return saved.source.positions[at]?.start ?? entry.text.length;
     };
