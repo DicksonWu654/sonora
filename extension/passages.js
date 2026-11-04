@@ -1,5 +1,6 @@
 (function (root) {
   const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden';
+  const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
   function visibleBlock(node) {
     if (!node?.isConnected || node.closest(textNoiseSelector)) return false;
@@ -11,12 +12,17 @@
     return [...node.getClientRects()].some(rect => rect.width > 1 && rect.height > 1);
   }
 
-  function createTextReader(node, cleanText) {
+  function createTextReader(node, cleanText, endPoint = null) {
     const parts = [];
-    let size = 0, done = false, text = '';
+    let size = 0, done = false, text = '', reachedEnd = false;
     const nestedList = node.matches('li') && node.querySelector('ul,ol,menu');
     function* read(child) {
-      if (child.nodeType === 3) { yield child.data; return; }
+      if (reachedEnd) return;
+      if (child.nodeType === 3) {
+        if (child === endPoint?.node) { reachedEnd = true; yield child.data.slice(0, endPoint.offset); }
+        else yield child.data;
+        return;
+      }
       if (child.nodeType !== 1) return;
       yield ''; // Even empty/hidden syntax nodes must yield to the caller's budget.
       if (child.matches(textNoiseSelector)) return;
@@ -26,8 +32,13 @@
       if (child.matches('br')) { yield '\n'; return; }
       const block = child !== node && /^(block|list-item|table-row|table-cell|flex|grid)$/.test(style.display);
       if (block) yield '\n';
-      for (let at = child.firstChild; at; at = at.nextSibling) yield* read(at);
-      if (block) yield '\n';
+      let index = 0;
+      for (let at = child.firstChild; at && !reachedEnd; at = at.nextSibling) {
+        if (child === endPoint?.node && index++ === endPoint.offset) { reachedEnd = true; break; }
+        yield* read(at);
+      }
+      if (child === endPoint?.node) reachedEnd = true;
+      if (block && !reachedEnd) yield '\n';
     }
     const iterator = read(node);
     return {
@@ -40,7 +51,13 @@
           if (part) parts.push(part); size += part.length;
           if (performance.now() - started >= budget) break;
         }
-        if (done || size >= limit) text = cleanText(parts.join('') || node.getAttribute('aria-label') || '');
+        if (done || size >= limit) {
+          let value = parts.join('');
+          // The next UTF-16 unit may complete a surrogate or extend the final
+          // grapheme. Keep a stable prefix until full extraction replaces it.
+          if (!done && value && size >= limit) value = value.slice(0, graphemes.segment(value).containing(value.length - 1).index);
+          text = cleanText(endPoint ? value : value || node.getAttribute('aria-label') || '');
+        }
         return { done, text, size };
       }
     };
@@ -63,18 +80,22 @@
     const directText = [...root.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
     if ((root.matches?.(blockSelector) && !root.matches('li,dt,dd,blockquote,' + customSelector)) || directText && !root.querySelector(blockSelector)) { yield root; return; }
     const selectedLists = new WeakSet();
+    const codeContainers = new WeakMap();
     let node = root;
     while (node) {
       let descend = true, candidate = false;
       if (node.matches(noiseSelector) || node.matches(textNoiseSelector)) descend = false;
       else if (node.matches(blockSelector)) {
-        const nested = node.matches('li,dt,dd,blockquote,' + customSelector)
-          && node.querySelector(semanticSelector + ',' + customSelector);
-        if (!nested || node.matches('li') && !node.querySelector('p,pre,blockquote')) { candidate = true; if (node.matches('li')) selectedLists.add(node); }
-        descend = Boolean(nested) || node.matches('li');
+        if (isCodeChrome(node, root, codeContainers)) descend = false;
+        else {
+          const nested = node.matches('li,dt,dd,blockquote,' + customSelector)
+            && node.querySelector(semanticSelector + ',' + customSelector);
+          if (!nested || node.matches('li') && !node.querySelector('p,pre,blockquote')) { candidate = true; if (node.matches('li')) selectedLists.add(node); }
+          descend = Boolean(nested) || node.matches('li');
+        }
       } else if (node.matches('div,section,span,[role="text"],[aria-label]') && !node.closest('pre') && !selectedLists.has(node.closest('li'))) {
         const direct = [...node.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
-        if (direct && !node.querySelector(blockSelector) && !isCodeChrome(node, root)) { candidate = true; descend = false; }
+        if (direct && !node.querySelector(blockSelector) && !isCodeChrome(node, root, codeContainers)) { candidate = true; descend = false; }
         else if (!node.firstElementChild && node.getAttribute('aria-label')?.length > 1) candidate = true;
       }
       // A caller may yield between batches while React replaces this turn.
@@ -97,10 +118,15 @@
     return block ? `block:${block.getAttribute('data-block-id')}` : '';
   }
 
-  function isCodeChrome(node, root) {
+  function isCodeChrome(node, root, containers = null) {
     for (let container = node.parentElement; container && container !== root; container = container.parentElement) {
       if (container.matches('article,main,[data-message-id],[data-testid^="conversation-turn-"]')) return false;
-      const pre = container.querySelector('pre');
+      let pre;
+      if (containers?.has(container)) pre = containers.get(container);
+      else {
+        pre = container.querySelector('pre');
+        containers?.set(container, pre);
+      }
       if (!pre) continue;
       if (pre.contains(node) || node.contains(pre)) return false;
       const prose = [...container.querySelectorAll('p,h1,h2,h3,h4,h5,h6,blockquote,li,td,th,dt,dd')]

@@ -104,7 +104,17 @@
   const compactString = text => String(text).normalize('NFKC').replace(/[\s\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu, '');
 
   function createRangeResolver(document) {
-    let saved = null;
+    let saved = null, caretRead = null;
+    const clean = root.BookText?.cleanText || (value => String(value).normalize('NFKC').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim());
+    function mappingFor(entry) {
+      if (entry.rangeMapping?.revision !== entry.domRevision || entry.rangeMapping?.prefixSafe === undefined) {
+        const content = entry.contentNode || entry.node, raw = content.textContent;
+        const text = clean(raw);
+        entry.rangeMapping = { revision: entry.domRevision, safe: compactString(raw) === compactString(entry.text),
+          prefixSafe: entry.partial ? text.startsWith(entry.text) : text === entry.text };
+      }
+      return entry.rangeMapping;
+    }
     function indexed(entry) {
       const node = entry?.contentNode || entry?.node;
       if (!node?.isConnected) return null;
@@ -125,8 +135,7 @@
       if (anchor.revision !== entry.domRevision) {
         // Native prefix coordinates are safe only when filtering did not remove
         // any DOM text. Hidden controls retain the ordinary filtered walker.
-        if (entry.rangeMapping?.revision !== entry.domRevision) entry.rangeMapping = { revision: entry.domRevision, safe: compactString(content.textContent) === compactString(entry.text) };
-        anchor.safe = entry.rangeMapping.safe;
+        anchor.safe = mappingFor(entry).safe;
         if (anchor.safe) {
           const prefix = document.createRange(); prefix.selectNodeContents(content); prefix.setEnd(anchor.node, 0);
           anchor.offset = compactString(prefix.toString()).length;
@@ -251,32 +260,49 @@
         return range;
       } catch { return null; }
     };
-    resolve.offsetAt = (entry, x, y) => {
-      const caret = document.caretPositionFromPoint?.(x, y);
+    resolve.offsetAt = (entry, x, y, position = null) => {
+      resolve.caret = null;
+      resolve.offsetPending = false;
+      const caret = position || document.caretPositionFromPoint?.(x, y);
       const fallback = caret ? null : document.caretRangeFromPoint?.(x, y);
       const node = caret?.offsetNode || fallback?.startContainer;
       const offset = caret?.offset ?? fallback?.startOffset;
       const content = entry.contentNode || entry.node;
       if (!node || !content.contains(node)) return null;
+      resolve.caret = { offsetNode: node, offset };
       // A native Range gives the prefix without walking/segmenting all code
       // lines. Keep end-of-line affinity, including indentation on the next line.
       const range = document.createRange();
       range.selectNodeContents(content); range.setEnd(node, offset);
-      const prefix = range.toString();
+      let prefix;
+      if (mappingFor(entry).prefixSafe) { caretRead = null; prefix = range.toString(); }
+      else {
+        if (!caretRead || caretRead.content !== content || caretRead.node !== node || caretRead.offset !== offset || caretRead.revision !== entry.domRevision) {
+          caretRead = { content, node, offset, revision: entry.domRevision,
+            reader: root.SonoraPassages.createTextReader(content, value => value, { node, offset }) };
+        }
+        if (caretRead.reader) {
+          const result = caretRead.reader.advance(2);
+          if (!result.done) { resolve.offsetPending = true; return null; }
+          caretRead.prefix = result.text; caretRead.reader = null;
+        }
+        prefix = caretRead.prefix;
+      }
       // Start near the caret instead of materializing wrappers for every text
       // node preceding a deep code click or hover. Keep the whole visual line.
-      const walker = document.createTreeWalker(content, 4); walker.currentNode = node;
-      let anchor = node, head = node.data.slice(0, offset), size = head.length;
-      while (!/[\r\n]/.test(head) && size < 2400 && walker.previousNode()) {
-        anchor = walker.currentNode; head = anchor.data; size += head.length;
+      if (node.nodeType === 3) {
+        const walker = document.createTreeWalker(content, 4); walker.currentNode = node;
+        let anchor = node, head = node.data.slice(0, offset), size = head.length;
+        while (!/[\r\n]/.test(head) && size < 2400 && walker.previousNode()) {
+          anchor = walker.currentNode; head = anchor.data; size += head.length;
+        }
+        entry.rangeAnchor = { node: anchor, revision: null, safe: false, offset: 0 };
       }
-      entry.rangeAnchor = { node: anchor, revision: null, safe: false, offset: 0 };
-      const clean = root.BookText?.cleanText || (value => String(value).normalize('NFKC').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim());
       let at = clean(prefix + '\ufffc').length - 1;
       if (offset > 0 && !/[\r\n]/.test(node.data?.slice(Math.max(0, offset - 1), offset) || '') && /\s/.test(entry.text[at] || '')) at--;
       return Math.max(0, Math.min(at, entry.partial ? Infinity : entry.text.length));
     };
-    resolve.reset = () => { saved = null; };
+    resolve.reset = () => { saved = caretRead = null; };
     return resolve;
   }
 

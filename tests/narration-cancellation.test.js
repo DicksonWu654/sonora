@@ -83,13 +83,16 @@ test('renders submitted while the worker loads wait for readiness and then synth
 });
 
 test('waiting for readiness supports cancellation, a deadline and worker failure', async t => {
-  const { narration, requests, makeReady } = backend(t, { ready: false, readyTimeoutMs: 30 });
+  const { narration, requests, makeReady } = backend(t, { ready: false });
   const controller = new AbortController();
   const cancelled = assert.rejects(narration.generate('Cancelled during loading', 'af_heart', { signal: controller.signal }), /stopped/);
   await tick(); controller.abort(new Error('stopped')); await cancelled;
-  await assert.rejects(narration.generate('Deadline during loading', 'af_heart'), /did not become ready in time/);
+  const deadline = backend(t, { ready: false, readyTimeoutMs: 30 });
+  await assert.rejects(deadline.narration.generate('Deadline during loading', 'af_heart'), /did not become ready in time/);
+  deadline.makeReady();
   makeReady(); await tick();
   assert.equal(requests.length, 0, 'cancelled and expired waiters must never synthesize');
+  assert.equal(deadline.requests.length, 0);
   const failed = backend(t, { ready: false });
   const rejected = assert.rejects(failed.narration.generate('Worker fails during loading', 'af_heart'), /stopped while warming up/);
   await tick(); failed.child.emit('exit', 1); await rejected;

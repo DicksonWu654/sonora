@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.6';
+  const OVERLAY_VERSION = '0.4.7';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -123,6 +123,8 @@
     queueOffset: 0,
     queueBlocks: null,
     queueStart: null,
+    queueWaiting: false,
+    queueEnded: false,
     rendered: new Map(),
     renderRequests: new Map(),
     ready: false,
@@ -258,7 +260,10 @@
     const bounds = window.SonoraWords.clipFor(entry, document);
     if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
     const offset = codeRange.offsetAt(entry, x, y);
-    if (offset === null) return null;
+    if (offset === null) {
+      if (codeRange.offsetPending) scheduleCodeHover(true);
+      return null;
+    }
     return codePartForOffset(entry, offset);
   }
   function codePartForOffset(entry, offset) {
@@ -334,7 +339,7 @@
   }
   function updateTransport() {
     els.playIcon.textContent = state.playing ? 'Ⅱ' : '▶';
-    els.playLabel.textContent = state.playing || state.pendingRender || state.pendingStart !== null ? 'Pause' : (state.index >= 0 && !state.completed ? 'Resume' : 'Play from top');
+    els.playLabel.textContent = state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting ? 'Pause' : (state.index >= 0 && !state.completed ? 'Resume' : 'Play from top');
     els.play.classList.toggle('is-playing', state.playing);
   }
   function releaseAudioObjectUrl() {
@@ -459,6 +464,7 @@
     return true;
   }
   function pausePlayback() {
+    state.queueWaiting = false;
     stopWordFrames();
     pauseWebAudio();
     els.audio.pause();
@@ -522,6 +528,10 @@
     for (let at = 0; at < snapshot.length || !indexingDone; at++) {
       if (at >= snapshot.length) { yield null; at--; continue; }
       const block = snapshot[at];
+      // A block selected earlier may already be known far beyond the scan.
+      // Wait for discovery to fill the gap before buffering that later block.
+      if (at && !indexingDone && (!discoveryFrontier
+        || (block.node.compareDocumentPosition(discoveryFrontier) & Node.DOCUMENT_POSITION_PRECEDING))) { yield null; at--; continue; }
       let cursor = block === selected ? offset : 0;
       while (cursor < block.text.length || block.partial) {
         if (cursor >= block.text.length || !opening && block.partial && block.text.length - cursor < 1201) { yield null; continue; }
@@ -589,6 +599,7 @@
     if (!item || !state.ready) return;
     const revision = ++state.revision;
     state.index = index;
+    state.queueWaiting = state.queueEnded = false;
     state.completed = false;
     state.playing = false;
     state.pendingRender = true;
@@ -657,6 +668,7 @@
     const entry = clickedEntry || blockEntries[blockIndex];
     state.queueIterator = !isGoogleDocsPage() && entry ? lazyQueue(entry, blockOffset) : null;
     state.queueOffset = 0;
+    state.queueWaiting = state.queueEnded = false;
     state.queueBlocks = null;
     const queue = state.queueIterator ? [] : queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset, true);
     if (state.queueIterator) { const first = state.queueIterator.next(); if (!first.done && first.value) queue.push(first.value); }
@@ -694,6 +706,7 @@
     }
   }
   function stop() {
+    state.queueWaiting = state.queueEnded = false;
     clickRevision++;
     resetWords();
     state.revision++;
@@ -760,24 +773,35 @@
     const entry = entriesByNode.get(block);
     if (!entry) return;
     const token = ++clickRevision;
-    if (entry.kind === 'code' && entry.partial && event.detail !== 0) {
-      const offset = codeRange.offsetAt(entry, event.clientX, event.clientY);
-      if (offset !== null && offset >= entry.text.length - 1200) {
-        completeClickedEntry(entry).then(() => {
-          if (state.closed || token !== clickRevision || !entry.node.isConnected) return;
-          const part = codePartForOffset(entry, offset);
-          if (part) startQueue(entry.index, part.offset, entry);
-        }).catch(error => { if (!state.closed && token === clickRevision) setStatus(error.message, 'error'); });
-        return;
-      }
+    if (entry.kind === 'code' && event.detail !== 0) {
+      selectCodeLine(entry, event, token);
+      return;
     }
-    const part = entry.kind === 'code' && event.detail !== 0 ? codePartAt(entry, event.clientX, event.clientY) : null;
-    if (entry.kind === 'code' && event.detail !== 0 && !part) return;
     if (isGoogleDocsPage()) {
       event.preventDefault();
       event.stopPropagation();
     }
-    startQueue(entry.index, part?.offset || 0, entry);
+    startQueue(entry.index, 0, entry);
+  }
+  function selectCodeLine(entry, event, token, position = null) {
+    if (state.closed || token !== clickRevision || !entry.node.isConnected) return;
+    const offset = codeRange.offsetAt(entry, event.clientX, event.clientY, position);
+    const caret = position || codeRange.caret;
+    if (offset === null) {
+      if (codeRange.offsetPending) {
+        const next = () => selectCodeLine(entry, event, token, caret);
+        if (globalThis.scheduler?.postTask) scheduler.postTask(next, { priority: 'user-blocking' }).catch(() => {});
+        else setTimeout(next, 0);
+      }
+      return;
+    }
+    if (entry.partial && offset >= entry.text.length - 1200) {
+      completeClickedEntry(entry).then(() => selectCodeLine(entry, event, token, caret))
+        .catch(error => { if (!state.closed && token === clickRevision) setStatus(error.message, 'error'); });
+      return;
+    }
+    const part = codePartForOffset(entry, offset);
+    if (part) startQueue(entry.index, part.offset, entry);
   }
   function completeClickedEntry(entry) {
     if (priorityReaders.has(entry.node)) return priorityReaders.get(entry.node);
@@ -815,6 +839,7 @@
       // Keep the selected queue through unrelated updates and DOM redraws.
       // A new page or an edit to the spoken text ends the old session.
       state.revision++;
+      state.queueWaiting = state.queueEnded = false;
       state.pendingStart = null;
       state.pendingRender = false;
       state.playing = false;
@@ -986,7 +1011,11 @@
     if (refreshTimer) return;
     refreshTimer = setTimeout(refreshBlocks, 100);
   }
-  let discoveryHandle = null, discoveryGeneration = 0, indexingDone = false;
+  let discoveryHandle = null, discoveryGeneration = 0, indexingDone = false, discoveryFrontier = null;
+  let panelPainted = false;
+  let panelPaintFrame = requestAnimationFrame(() => {
+    panelPaintFrame = requestAnimationFrame(() => { panelPaintFrame = null; panelPainted = true; });
+  });
   let finishDiscovery;
   const whenIndexed = new Promise(resolve => { finishDiscovery = resolve; });
   function removeEntries(predicate) {
@@ -1007,6 +1036,8 @@
     if (isGoogleDocsPage()) { updateBlocks(source.blocks); finishDiscovery(); return; }
     if (discoveryHandle !== null) clearTimeout(discoveryHandle);
     const generation = ++discoveryGeneration;
+    indexingDone = false;
+    discoveryFrontier = null;
     removeEntries(entry => !entry.node.isConnected || !source.root?.contains(entry.node));
     const seenNodes = new Set();
     const existing = new Map([...entriesByKey.values()].map(entry => [entry.node, entry.domRevision]));
@@ -1015,6 +1046,7 @@
     function batch() {
       discoveryHandle = null;
       if (state.closed || generation !== discoveryGeneration) return;
+      if (!panelPainted && !document.hidden) { discoveryHandle = setTimeout(batch, 16); return; }
       if (priorityReaders.size) { discoveryHandle = setTimeout(batch, 16); return; }
       const started = performance.now();
       do {
@@ -1046,14 +1078,16 @@
           reading = null;
         } else {
           const next = candidates.next();
-          if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); updateMeta(); return; }
+          if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); resumeDiscoveredQueue(); updateMeta(); return; }
           const node = next.value;
+          discoveryFrontier = node;
           if (!window.SonoraPassages.visibleBlock(node)) continue;
           seenNodes.add(node);
           if (entriesByNode.has(node) && !entriesByNode.get(node).partial && !dirtyTextNodes.has(node)) continue;
           reading = { node, version: textVersions.get(node) || 0, reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
         }
       } while (performance.now() - started < 4);
+      resumeDiscoveredQueue();
       updateMeta();
       discoveryHandle = setTimeout(batch, 0);
     }
@@ -1064,7 +1098,15 @@
         node.classList.add(pageClass); node.classList.toggle('sonora-code-block', entry.kind === 'code'); knownBlocks.add(node);
         const snapshot = state.queueBlocks;
         if (snapshot && (snapshot[0].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
-          && !snapshot.some(block => block.key === entry.key)) snapshot.push({ ...entry });
+          && !snapshot.some(block => block.key === entry.key)) {
+          let low = 1, high = snapshot.length;
+          while (low < high) {
+            const middle = (low + high) >> 1;
+            if (snapshot[middle].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) low = middle + 1;
+            else high = middle;
+          }
+          snapshot.splice(low, 0, { ...entry });
+        }
       }
     }
     // Give the panel its first paint and install click handlers before indexing.
@@ -1092,7 +1134,8 @@
         if (node === source.root) break;
       }
     }
-    if (!block || !source.root?.contains(block) || block.closest(source.noiseSelector)) return;
+    if (!block || !source.root?.contains(block) || block.closest(source.noiseSelector)
+      || window.SonoraPassages.isCodeChrome(block, source.root)) return;
     if (!entriesByNode.has(block)) {
       for (const entry of reconcileEntries([], makeIncomingEntries([block], 2400))) {
         entry.index = blockEntries.length;
@@ -1176,12 +1219,14 @@
     }, { once: true });
   }
   els.play.addEventListener('click', () => {
-    if (state.playing || state.pendingRender || state.pendingStart !== null) {
+    if (state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting) {
       state.pendingStart = null;
       pausePlayback();
       state.playing = false;
       updateTransport();
       setStatus('Paused', 'ready');
+    } else if (state.queueEnded) {
+      advanceQueue();
     } else if (!state.completed && state.webAudioBuffer && state.index >= 0) {
       const revision = state.revision;
       playWebAudio(state.webAudioSourceData, revision, state.webAudioOffset).then(started => {
@@ -1234,6 +1279,7 @@
   function advanceQueue(revision = state.revision) {
     if (revision !== state.revision) return;
     state.playing = false;
+    state.queueEnded = true;
     fillQueue();
     if (state.index + 1 < state.queue.length) {
       if (state.index >= 31 && !isGoogleDocsPage()) {
@@ -1246,13 +1292,29 @@
       }
       play(state.index + 1);
     }
-    else {
+    else if (state.queueIterator) {
+      state.queueWaiting = true;
+      state.pendingRender = false;
+      resetWords();
+      updateTransport();
+      setStatus('Finding the next passage…', 'busy');
+    } else {
+      state.queueWaiting = false;
+      state.queueEnded = false;
       state.pendingRender = false;
       state.completed = true;
       resetWords();
       els.track.style.width = '100%';
       updateTransport();
       setStatus('Page section complete — click another block to jump.', 'ready');
+    }
+  }
+  function resumeDiscoveredQueue() {
+    if (!state.queueWaiting || state.closed) return;
+    fillQueue();
+    if (state.index + 1 < state.queue.length || !state.queueIterator) {
+      state.queueWaiting = false;
+      advanceQueue();
     }
   }
   els.speed.addEventListener('input', () => {
@@ -1311,6 +1373,7 @@
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);
     if (discoveryHandle !== null) clearTimeout(discoveryHandle);
+    if (panelPaintFrame !== null) cancelAnimationFrame(panelPaintFrame);
     discoveryGeneration++;
     if (codeHoverFrame !== null) cancelAnimationFrame(codeHoverFrame);
     if (codeHoverTimer !== null) clearTimeout(codeHoverTimer);
@@ -1422,9 +1485,11 @@
       };
     }
     const chat = isChatGPTPage();
+    const firstReadable = selector => [...document.querySelectorAll(selector)].find(node => !node.closest(noiseSelector));
     const root = chat ? document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body
-      : document.querySelector('#mw-content-text .mw-parser-output, #mw-content-text')
-        || document.querySelector('article,main,[role="main"],.post-content,.article-content,.entry-content,.markdown-body')
+      : firstReadable('#mw-content-text .mw-parser-output, #mw-content-text')
+        || firstReadable('main,[role="main"],.post-content,.article-content,.entry-content,.markdown-body')
+        || firstReadable('article')
         || document.body || document.documentElement;
     return { root, blocks: [], text: '', noiseSelector, title: cleanText(document.title || 'Untitled page') };
   }
