@@ -223,3 +223,72 @@ test('tracked DOM revisions avoid rescanning text nodes on every animation frame
   tracker.update(entry, .3, null);
   assert.equal([...highlights.get('sonora-current-word')][0].startOffset, 6);
 });
+
+test('a highlight in a 20,000-line node indexes only the text needed by that word', () => {
+  const { document, makeNode } = domTrackerFixture();
+  const node = makeNode('first();');
+  node.textNodes = Array.from({length: 20000}, (_, at) => ({ data: `call${at}();\n`, isConnected: true, parentElement: { closest: () => null } }));
+  let visited = 0;
+  const walker = document.createTreeWalker;
+  document.createTreeWalker = (...args) => {
+    const value = walker(...args), next = value.nextNode;
+    value.nextNode = function () { visited++; return next.call(this); };
+    return value;
+  };
+  const entry = { node, text: node.textNodes.map(child => child.data).join(''), domRevision: 1 };
+  const resolve = createRangeResolver(document);
+  assert.equal(resolve(entry, 0, 4).startContainer, node.textNodes[0]);
+  assert.equal(visited, 2);
+  for (let frame = 0; frame < 100; frame++) resolve(entry, 0, 4);
+  assert.equal(visited, 2);
+});
+
+
+test('sparse ranges preserve graphemes across inline nodes and 1,024-character windows', () => {
+  const { document, makeNode } = domTrackerFixture();
+  const node = makeNode('');
+  const parent = { closest: () => null };
+  node.textNodes = ['a'.repeat(1023) + 'e', '\u0301 word'].map(data => ({data, parentElement: parent, isConnected: true}));
+  const text = ('a'.repeat(1023) + 'e\u0301 word').normalize('NFKC');
+  const resolve = createRangeResolver(document);
+  const accent = resolve({ node, text, domRevision: 1 }, 1023, 1);
+  assert.equal(accent.startContainer, node.textNodes[0]);
+  assert.equal(accent.startOffset, 1023);
+  assert.equal(accent.endContainer, node.textNodes[1]);
+  assert.equal(accent.endOffset, 1);
+  const word = resolve({ node, text, domRevision: 1 }, 1025, 4);
+  assert.equal(word.startContainer, node.textNodes[1]);
+  assert.equal(word.startOffset, 2);
+  assert.equal(word.endOffset, 6);
+});
+
+test('a new selection can highlight text appended past an already completed sparse index', () => {
+  const { document, makeNode } = domTrackerFixture();
+  const node = makeNode('Read this'), resolve = createRangeResolver(document);
+  assert.equal(resolve({ node, text: 'Read this', domRevision: 1 }, 0, 4).endOffset, 4);
+  node.textNodes[0].data = 'Read this later';
+  const range = resolve({ node, text: 'Read this later', domRevision: 2 }, 10, 5);
+  assert.equal(range.startOffset, 10);
+  assert.equal(range.endOffset, 15);
+});
+
+test('the sparse DOM cache retains a bounded window after traversing thousands of code lines', () => {
+  const { document, makeNode } = domTrackerFixture();
+  const node = makeNode('');
+  let reads = 0;
+  node.textNodes = Array.from({length: 10000}, (_, at) => {
+    const value = 'call' + at + '();\n';
+    return { get data() { reads++; return value; }, parentElement: {closest: () => null}, isConnected: true };
+  });
+  const text = node.textNodes.map(child => child.data).join('');
+  const entry = { node, text }, resolve = createRangeResolver(document), offset = text.indexOf('call9000');
+  let range;
+  for (let frame = 0; frame < 200 && !range; frame++) range = resolve(entry, offset, 8);
+  assert.equal(range.startContainer, node.textNodes[9000]);
+  reads = 0;
+  for (let frame = 0; frame < 100; frame++) assert(resolve(entry, offset, 8));
+  assert(reads <= 130 * 100, String(reads));
+  let opening;
+  for (let frame = 0; frame < 200 && !opening; frame++) opening = resolve(entry, 0, 5);
+  assert.equal(opening.startContainer, node.textNodes[0], 'jumping backward rebuilds the bounded index');
+});

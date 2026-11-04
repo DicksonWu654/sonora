@@ -1,18 +1,18 @@
-:where(.sonora-readable-block) {
+:where(.sonora-readable-block:not(pre)) {
   cursor: pointer !important;
 }
 
-::highlight(sonora-current-word) {
+:where(.sonora-readable-block:not(pre))::highlight(sonora-current-word) {
   background-color: #efc987;
   color: #241c12;
   text-decoration: underline;
 }
 
-::highlight(sonora-hover-code) {
+:where(.sonora-readable-block:not(pre))::highlight(sonora-hover-code) {
   background-color: rgba(216, 178, 139, .18);
 }
 
-::highlight(sonora-current-code) {
+:where(.sonora-readable-block:not(pre))::highlight(sonora-current-code) {
   background-color: rgba(216, 178, 139, .32);
 }
 

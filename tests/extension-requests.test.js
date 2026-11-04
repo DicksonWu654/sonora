@@ -6,13 +6,13 @@ const validation = require('../extension/validation');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function background(fetch, get = async () => ({})) {
-  let receive, action;
+  let receive, action, attached = false;
   const notices = [], injections = [];
   const timers = new Set();
   const chrome = {
-    runtime: { id: 'sonora', onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { receive = fn; } } },
+    runtime: { id: 'sonora', getManifest: () => ({version: 'test'}), onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { receive = fn; } } },
     contextMenus: { removeAll(callback) { callback(); }, create(options, callback) { callback(); }, onClicked: { addListener() {} } },
-    scripting: { async insertCSS() { injections.push('css'); }, async executeScript() { injections.push('scripts'); } },
+    scripting: { async removeCSS() { injections.push('remove-css'); }, async insertCSS() { injections.push('css'); }, async executeScript(options) { if (options.func) { injections.push(options.args ? 'probe' : 'paint'); return [{result: attached}]; } injections.push('scripts'); attached = true; } },
     tabs: { async sendMessage(tabId, message) { notices.push(message); } },
     action: { onClicked: { addListener(fn) { action = fn; } } }, storage: { local: { get } }
   };
@@ -89,7 +89,7 @@ test('toolbar prewarm runs alongside injection and synthesis metadata precedes t
   });
   await bridge.action({ id: 1 });
   await tick();
-  assert.deepEqual(bridge.injections, ['css', 'scripts']);
+  assert.deepEqual(bridge.injections, ['probe', 'scripts', 'paint', 'remove-css', 'css'], 'show controls before applying page-wide styles');
   assert.equal(bridge.timers.size, 0);
   const rendered = bridge.send({ type: 'sonora-render', requestId: 'early', text: 'Read this.' });
   await tick();
@@ -97,4 +97,14 @@ test('toolbar prewarm runs alongside injection and synthesis metadata precedes t
   assert.equal(bridge.notices[0].type, 'sonora-render-ready');
   await bridge.send({ type: 'sonora-cancel-render', requestId: 'early' });
   assert.match((await rendered).error, /cancelled/);
+});
+
+
+test('repeated toolbar toggles reuse the overlay without injecting more scripts or CSS', async () => {
+  const bridge = background(async () => ({json: async () => ({ready: true})}));
+  await bridge.action({id: 1});
+  await bridge.action({id: 1});
+  assert.deepEqual(bridge.injections, ['probe', 'scripts', 'paint', 'remove-css', 'css', 'probe']);
+  await tick();
+  assert.equal(bridge.timers.size, 0);
 });

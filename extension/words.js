@@ -18,11 +18,23 @@
     const text = String(value);
     let compact = '';
     const positions = [];
-    for (const { segment, index } of segmenter.segment(text)) {
-      for (const char of segment.normalize('NFKC')) {
-        if (ignored.test(char)) continue;
-        compact += char;
-        for (let i = 0; i < char.length; i++) positions.push({ start: index, end: index + segment.length });
+    // ASCII dominates prose/code. Segment only Unicode runs; Intl.Segmenter
+    // over a whole answer is costly and allocates a record for every letter.
+    for (let at = 0; at < text.length;) {
+      if (text.charCodeAt(at) < 128 && (at + 1 === text.length || text.charCodeAt(at + 1) < 128)) {
+        const char = text[at];
+        if (!ignored.test(char)) { compact += char; positions.push({ start: at, end: at + 1 }); }
+        at++;
+        continue;
+      }
+      const from = at;
+      do { at++; } while (at < text.length && text.charCodeAt(at) >= 128);
+      for (const { segment, index } of segmenter.segment(text.slice(from, at))) {
+        for (const char of segment.normalize('NFKC')) {
+          if (ignored.test(char)) continue;
+          compact += char;
+          for (let i = 0; i < char.length; i++) positions.push({ start: from + index, end: from + index + segment.length });
+        }
       }
     }
     return { text: compact, positions };
@@ -67,31 +79,6 @@
     return high >= 0 && time < words[high].end ? high : -1;
   }
 
-  function domIndex(node, document) {
-    const segments = [];
-    let text = '';
-    const walker = document.createTreeWalker(node, 4); // SHOW_TEXT
-    while (walker.nextNode()) {
-      const child = walker.currentNode, parent = child.parentElement;
-      if (!parent || parent.closest('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden')) continue;
-      if (node.matches('li')) {
-        const nestedList = parent.closest('ul,ol,menu');
-        if (nestedList && node.contains(nestedList)) continue;
-      }
-      if (document.defaultView.getComputedStyle(parent).visibility === 'hidden') continue;
-      let hidden = false;
-      for (let ancestor = parent; ancestor; ancestor = ancestor.parentElement) {
-        const style = document.defaultView.getComputedStyle(ancestor);
-        if (style.display === 'none' || style.visibility === 'collapse' || style.opacity === '0') { hidden = true; break; }
-        if (ancestor === node) break;
-      }
-      if (hidden) continue;
-      segments.push({ node: child, value: child.data, start: text.length, end: text.length + child.data.length });
-      text += child.data;
-    }
-    return { ...compactMap(text), rawText: text, segments, byNode: new Map(segments.map(segment => [segment.node, segment])) };
-  }
-
   function domRange(index, span, document) {
     if (!span || !index.positions[span.start] || !index.positions[span.end - 1]) return null;
     const start = index.positions[span.start].start, end = index.positions[span.end - 1].end;
@@ -114,50 +101,182 @@
     } catch { return null; } // The page can replace text while an audio frame runs.
   }
 
+  const compactString = text => String(text).normalize('NFKC').replace(/[\s\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu, '');
+
   function createRangeResolver(document) {
-    const cache = new WeakMap();
+    let saved = null;
     function indexed(entry) {
       const node = entry?.contentNode || entry?.node;
       if (!node?.isConnected) return null;
-      let saved = cache.get(node);
-      const stale = saved && (entry.domRevision === undefined
-        ? saved.index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value)
-        : saved.revision !== entry.domRevision);
-      if (!saved || saved.text !== entry.text || stale) {
-        const index = domIndex(node, document), source = compactMap(entry.text);
-        saved = { text: entry.text, revision: entry.domRevision, index, source, base: index.text.indexOf(source.text) };
-        cache.set(node, saved);
-      }
+      const same = saved?.node === node;
+      const unchanged = same && (entry.domRevision === undefined
+        ? saved.segments.every(segment => segment.pieces.every(piece => piece.node.isConnected && piece.node.data === piece.value))
+        : saved.revision === entry.domRevision);
+      // Appends after the selected snapshot leave its DOM ranges valid.
+      const appended = !unchanged && same && entry.text.startsWith(saved.text) && saved.segments.every(segment => segment.pieces.every(piece => piece.node.isConnected && piece.node.data.startsWith(piece.value)));
+      if (!unchanged && !appended) saved = null;
+      if (!saved) saved = { node, text: entry.text, revision: entry.domRevision, walker: document.createTreeWalker(node, 4), indexedLength: entry.text.length, segments: [], size: 0, styles: new WeakMap(), done: false, prefixOffset: 0, prefixSize: 0 };
+      if (appended) { saved.revision = entry.domRevision; saved.text = entry.text; }
       return saved;
     }
+    function anchorFor(entry) {
+      const anchor = entry.rangeAnchor, content = entry.contentNode || entry.node;
+      if (!anchor?.node.isConnected || !content.contains(anchor.node)) return null;
+      if (anchor.revision !== entry.domRevision) {
+        // Native prefix coordinates are safe only when filtering did not remove
+        // any DOM text. Hidden controls retain the ordinary filtered walker.
+        if (entry.rangeMapping?.revision !== entry.domRevision) entry.rangeMapping = { revision: entry.domRevision, safe: compactString(content.textContent) === compactString(entry.text) };
+        anchor.safe = entry.rangeMapping.safe;
+        if (anchor.safe) {
+          const prefix = document.createRange(); prefix.selectNodeContents(content); prefix.setEnd(anchor.node, 0);
+          anchor.offset = compactString(prefix.toString()).length;
+        }
+        anchor.revision = entry.domRevision;
+      }
+      return anchor.safe ? anchor : null;
+    }
+    function hidden(parent, data) {
+      if (!parent || parent === data.node.parentElement) return false;
+      if (data.styles.has(parent)) return data.styles.get(parent);
+      const style = document.defaultView.getComputedStyle(parent);
+      const value = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0'
+        || Boolean(parent.matches?.('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden'))
+        || hidden(parent.parentElement, data);
+      data.styles.set(parent, value);
+      return value;
+    }
+    function extend(data, end) {
+      const started = performance.now();
+      while (!data.done) {
+        if (performance.now() - started > 2) break;
+        let pending = data.pending;
+        if (pending) data.pending = null;
+        else {
+          if (!data.walker.nextNode()) { data.done = true; break; }
+          const node = data.walker.currentNode;
+          if (hidden(node.parentElement, data)) continue;
+          if (data.node.matches('li')) {
+            const list = node.parentElement.closest('ul,ol,menu');
+            if (list && data.node.contains(list)) continue;
+          }
+          pending = { node, value: node.data };
+        }
+        const { node, value } = pending, previous = data.segments.at(-1);
+        const joins = previous && (/^[\p{M}\u200d\ufe00-\ufe0f\udc00-\udfff]/u.test(value) || /[\u200d\ud800-\udbff]$/u.test(previous.value));
+        if (data.size >= end && !joins) { data.pending = pending; break; }
+        const piece = { node, value, start: joins ? previous.value.length : 0 };
+        if (joins) {
+          previous.value += value; previous.pieces.push(piece); previous.window = null;
+          previous.end = previous.start + compactString(previous.value).length;
+          data.size = previous.end;
+        } else {
+          const size = compactString(value).length;
+          if (size) data.segments.push({ node, value, pieces: [piece], start: data.size, end: data.size + size });
+          data.size += size;
+        }
+        // Huge syntax trees advance across frames instead of blocking a click.
+        if (performance.now() - started > 2) break;
+      }
+      return data.size >= end;
+    }
     const resolve = (entry, start, length) => {
-      const saved = indexed(entry);
-      if (!saved) return null;
-      const span = compactSpan(saved.source, start, length);
-      return span && saved.base >= 0 ? domRange(saved.index, { start: saved.base + span.start, end: saved.base + span.end }, document) : null;
+      resolve.pending = false;
+      if (!Number.isInteger(start) || start < 0 || !Number.isInteger(length) || length <= 0) return null;
+      let data = indexed(entry);
+      if (!data) return null;
+      if (start < data.prefixOffset) { data.prefixOffset = data.prefixSize = 0; }
+      const from = data.prefixSize + compactString(entry.text.slice(data.prefixOffset, start)).length;
+      const size = compactString(entry.text.slice(start, start + length)).length;
+      const anchor = anchorFor(entry);
+      if (data.segments[0]?.start > from || data.done && from + size > data.size && entry.text.length > data.indexedLength
+        || anchor && anchor.offset <= from && anchor.offset > data.size + 1200) {
+        saved = null; data = indexed(entry);
+        if (anchor && anchor.offset <= from) {
+          data.walker.currentNode = anchor.node;
+          data.pending = { node: anchor.node, value: anchor.node.data };
+          data.size = anchor.offset;
+        }
+      }
+      data.prefixOffset = start; data.prefixSize = from;
+      if (!size) return null;
+      const complete = extend(data, from + size);
+      // Keep a small look-behind window, plus the requested range. A reader
+      // can traverse hours of code without retaining every visited DOM node.
+      let discard = 0;
+      while (discard < data.segments.length - 128 && data.segments[discard].end <= from) discard++;
+      if (discard) { data.segments.splice(0, discard); data.styles = new WeakMap(); }
+      if (!complete) { resolve.pending = !data.done; return null; }
+      const at = offset => {
+        let low = 0, high = data.segments.length;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (data.segments[middle].end <= offset) low = middle + 1;
+          else high = middle;
+        }
+        return data.segments[low];
+      };
+      const first = at(from), last = at(from + size - 1);
+      if (!first?.node.isConnected || !last?.node.isConnected) return null;
+      // Only map the two text nodes containing the endpoints. For a 50,000-word
+      // text node, use a bounded raw window around the desired compact offset.
+      const point = (segment, compactOffset, endPoint) => {
+        const target = compactOffset - segment.start;
+        let raw = segment.window && target >= segment.window.counted ? segment.window.raw : 0;
+        let counted = raw ? segment.window.counted : 0;
+        // Native whitespace removal counts large ASCII prefixes cheaply.
+        while (raw < segment.value.length) {
+          let end = Math.min(segment.value.length, raw + 1024);
+          while (end < segment.value.length && (/^[\p{M}\u200d\ufe00-\ufe0f\udc00-\udfff]/u.test(segment.value.slice(end)) || segment.value[end - 1] === '\u200d')) end++;
+          const window = segment.value.slice(raw, end);
+          const count = compactString(window).length;
+          if (counted + count > target) break;
+          raw += window.length; counted += count;
+        }
+        let end = Math.min(segment.value.length, raw + 1026);
+        while (end < segment.value.length && (/^[\p{M}\u200d\ufe00-\ufe0f\udc00-\udfff]/u.test(segment.value.slice(end)) || segment.value[end - 1] === '\u200d')) end++;
+        const cached = segment.window;
+        const map = cached?.raw === raw ? cached.map : compactMap(segment.value.slice(raw, end));
+        segment.window = { raw, counted, map };
+        const position = map.positions[target - counted];
+        if (!position) return null;
+        const offset = raw + (endPoint ? position.end : position.start);
+        const piece = segment.pieces.find(piece => endPoint ? offset <= piece.start + piece.value.length : offset < piece.start + piece.value.length) || segment.pieces.at(-1);
+        return { node: piece.node, offset: offset - piece.start };
+      };
+      const firstOffset = point(first, from, false), lastOffset = point(last, from + size - 1, true);
+      if (firstOffset === null || lastOffset === null) return null;
+      try {
+        const range = document.createRange();
+        range.setStart(firstOffset.node, firstOffset.offset); range.setEnd(lastOffset.node, lastOffset.offset);
+        return range;
+      } catch { return null; }
     };
     resolve.offsetAt = (entry, x, y) => {
       const caret = document.caretPositionFromPoint?.(x, y);
-      const range = caret ? null : document.caretRangeFromPoint?.(x, y);
-      const node = caret?.offsetNode || range?.startContainer;
-      const offset = caret?.offset ?? range?.startOffset;
-      if (!node || !(entry.contentNode || entry.node).contains(node)) return null;
-      const saved = indexed(entry), segment = saved?.index.byNode.get(node);
-      if (!segment || saved.base < 0) return null;
-      const raw = segment.start + offset;
-      let low = 0, high = saved.index.positions.length;
-      while (low < high) {
-        const middle = (low + high) >> 1;
-        if (saved.index.positions[middle].end <= raw) low = middle + 1;
-        else high = middle;
+      const fallback = caret ? null : document.caretRangeFromPoint?.(x, y);
+      const node = caret?.offsetNode || fallback?.startContainer;
+      const offset = caret?.offset ?? fallback?.startOffset;
+      const content = entry.contentNode || entry.node;
+      if (!node || !content.contains(node)) return null;
+      // A native Range gives the prefix without walking/segmenting all code
+      // lines. Keep end-of-line affinity, including indentation on the next line.
+      const range = document.createRange();
+      range.selectNodeContents(content); range.setEnd(node, offset);
+      const prefix = range.toString();
+      // Start near the caret instead of materializing wrappers for every text
+      // node preceding a deep code click or hover. Keep the whole visual line.
+      const walker = document.createTreeWalker(content, 4); walker.currentNode = node;
+      let anchor = node, head = node.data.slice(0, offset), size = head.length;
+      while (!/[\r\n]/.test(head) && size < 2400 && walker.previousNode()) {
+        anchor = walker.currentNode; head = anchor.data; size += head.length;
       }
-      // An end-of-line caret is before the newline that compactMap removes.
-      // Keep that line; indentation after a newline belongs to the next line.
-      const previous = saved.index.positions[low - 1], next = saved.index.positions[low];
-      if (previous && (!next || raw < next.start) && !/[\r\n]/.test(saved.index.rawText.slice(previous.end, raw))) low--;
-      const at = Math.max(0, low - saved.base);
-      return saved.source.positions[at]?.start ?? entry.text.length;
+      entry.rangeAnchor = { node: anchor, revision: null, safe: false, offset: 0 };
+      const clean = root.BookText?.cleanText || (value => String(value).normalize('NFKC').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim());
+      let at = clean(prefix + '\ufffc').length - 1;
+      if (offset > 0 && !/[\r\n]/.test(node.data?.slice(Math.max(0, offset - 1), offset) || '') && /\s/.test(entry.text[at] || '')) at--;
+      return Math.max(0, Math.min(at, entry.partial ? Infinity : entry.text.length));
     };
+    resolve.reset = () => { saved = null; };
     return resolve;
   }
 
@@ -195,8 +314,24 @@
     return result;
   }
 
+  function clipFor(entry, document) {
+    const window = document.defaultView;
+    const clip = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    for (let node = entry?.contentNode || entry?.node; node; node = node.parentElement) {
+      const style = window.getComputedStyle(node);
+      const x = /auto|scroll|hidden|clip/.test(style.overflowX), y = /auto|scroll|hidden|clip/.test(style.overflowY);
+      if (x || y) {
+        const rect = node.getBoundingClientRect();
+        if (x) { clip.left = Math.max(clip.left, rect.left); clip.right = Math.min(clip.right, rect.right); }
+        if (y) { clip.top = Math.max(clip.top, rect.top); clip.bottom = Math.min(clip.bottom, rect.bottom); }
+      }
+      if (node.matches('pre')) break;
+    }
+    return clip;
+  }
+
   function createTracker(document, container) {
-    let words = [], spans = [], item = null, index = null, indexedNode = null, sourceText = '', sourceCompact = '', sourceBase = -1, current = -1, indexedRevision;
+    let words = [], spans = [], item = null, current = -1;
     const boxes = [];
     const context = document.createElement('canvas').getContext('2d');
     const window = document.defaultView;
@@ -227,69 +362,55 @@
         boxes[at].dataset.word = item.text.slice(words[current].textOffset, words[current].textOffset + words[current].length);
       });
     }
+    const resolve = createRangeResolver(document);
+    let lastNode = null, lastRevision, clip = null;
     function prepare(entry, passage, timings) {
-      clearPaint();
-      item = passage;
-      index = null;
-      indexedNode = null;
-      sourceBase = -1;
-      spans = [];
-      sourceText = entry?.text || '';
-      const matched = entry && passage.blockOffset >= 0 && sourceText.slice(passage.blockOffset, passage.blockOffset + passage.text.length) === passage.text;
+      clearPaint(); item = passage; clip = null;
+      const matched = entry && passage.blockOffset >= 0 && entry.text.slice(passage.blockOffset, passage.blockOffset + passage.text.length) === passage.text;
       words = matched && Array.isArray(timings) ? timings.filter(word => word && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end > word.start
         && Number.isInteger(word.textOffset) && Number.isInteger(word.length) && word.textOffset >= 0 && word.length > 0 && word.textOffset + word.length <= passage.text.length).sort((a, b) => a.start - b.start) : [];
-      if (!words.length) return;
-      const source = compactMap(sourceText);
-      sourceCompact = source.text;
-      spans = words.map(word => compactSpan(source, item.blockOffset + word.textOffset, word.length));
-      if (!entry.rects && entry.node?.isConnected) {
-        index = domIndex(entry.contentNode || entry.node, document);
-        indexedNode = entry.contentNode || entry.node;
-        indexedRevision = entry.domRevision;
-        sourceBase = index.text.indexOf(source.text);
+      if (entry?.rects) {
+        const source = compactMap(entry.text);
+        spans = words.map(word => compactSpan(source, passage.blockOffset + word.textOffset, word.length));
+      } else if (words.length) {
+        // Warm only the first word's range. Subsequent frames advance the index.
+        resolve(entry, passage.blockOffset + words[0].textOffset, words[0].length);
       }
     }
     function update(entry, time, surface) {
       const next = wordAt(words, time);
       if (!entry || !item || entry.text.slice(item.blockOffset, item.blockOffset + item.text.length) !== item.text || next < 0) { clearPaint(); return; }
-      if (entry.text !== sourceText) {
-        sourceText = entry.text;
-        const source = compactMap(sourceText);
-        sourceCompact = source.text;
-        spans = words.map(word => compactSpan(source, item.blockOffset + word.textOffset, word.length));
-        index = null;
-        current = -1;
-      }
-      if (!entry.rects && entry.node?.isConnected && (!index || (entry.contentNode || entry.node) !== indexedNode || (entry.domRevision === undefined ? index.segments.some(segment => !segment.node.isConnected || segment.node.data !== segment.value) : indexedRevision !== entry.domRevision))) {
-        index = domIndex(entry.contentNode || entry.node, document);
-        indexedNode = entry.contentNode || entry.node;
-        indexedRevision = entry.domRevision;
-        sourceBase = index.text.indexOf(sourceCompact);
-        current = -1;
-      }
       const span = spans[next];
       if (entry.rects) {
         current = next;
         const editor = surface?.closest('.kix-appview-editor')?.getBoundingClientRect();
         const clip = { left: Math.max(0, editor?.left || 0), top: Math.max(0, editor?.top || 0), right: Math.min(window.innerWidth, editor?.right ?? window.innerWidth), bottom: Math.min(window.innerHeight, editor?.bottom ?? window.innerHeight) };
         paintBoxes(docsRects(entry, span, surface, context), clip);
-      } else if (index && sourceBase >= 0 && span) {
-        if (registry && Highlight && next === current) return;
-        const range = domRange(index, { start: sourceBase + span.start, end: sourceBase + span.end }, document);
+      } else {
+        const node = entry.contentNode || entry.node;
+        const boxesNeeded = entry.useRectangles || entry.kind === 'code' || entry.text.length > 12000 || !registry || !Highlight;
+        if (next === current && node === lastNode && entry.domRevision !== undefined && lastRevision === entry.domRevision && (!boxesNeeded || clip)) return;
+        const word = words[next];
+        const range = resolve(entry, item.blockOffset + word.textOffset, word.length);
         if (!range) { clearPaint(); return; }
-        current = next;
-        if (registry && Highlight) {
-          const highlight = new Highlight(range);
-          highlight.priority = 2;
+        current = next; lastNode = node; lastRevision = entry.domRevision;
+        if (!boxesNeeded) {
+          while (boxes.length) boxes.pop().remove();
+          const highlight = new Highlight(range); highlight.priority = 2;
           registry.set(highlightName, highlight);
-        } else paintBoxes([...range.getClientRects()], { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
+        } else {
+          registry?.delete(highlightName);
+          if (!clip) clip = clipFor(entry, document);
+          paintBoxes([...range.getClientRects()], clip);
+        }
       }
     }
-    function reset() { clearPaint(); words = []; spans = []; item = index = indexedNode = null; sourceText = sourceCompact = ''; sourceBase = -1; }
-    return { prepare, update, reset };
+    function reset(release = false) { clearPaint(); words = []; spans = []; item = null; if (release) resolve.reset(); }
+
+    return { prepare, update, reset, invalidate: () => { clip = null; } };
   }
 
-  const api = { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, createTracker };
+  const api = { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, clipFor, createTracker };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraWords = api;
 })(globalThis);

@@ -1,6 +1,9 @@
 (function (root) {
   function cleanText(text) {
-    return String(text).toWellFormed().normalize('NFKC')
+    const normalized = String(text).toWellFormed().normalize('NFKC');
+    // Avoid copying already clean prose/code at every queue and DOM refresh.
+    if (/^[\x20-\x7e\n]*$/.test(normalized) && normalized.trim() === normalized && !/ {2,}| \n|\n |\n{3,}/.test(normalized)) return normalized;
+    return normalized
       .replace(/\r\n?/g, '\n')
       .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
       .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();

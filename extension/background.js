@@ -49,13 +49,30 @@ createMenu();
 async function injectReader(tabId) {
   let lastError;
   let cssInjected = false;
+  let readerInjected = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      if (!readerInjected) {
+        const version = chrome.runtime.getManifest().version;
+        const results = await chrome.scripting.executeScript({ target: { tabId }, func: version => {
+          if (window.__sonoraOverlay?.version !== version) return false;
+          window.__sonoraOverlay.toggle();
+          return true;
+        }, args: [version] });
+        if (results?.[0]?.result) return;
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js'] });
+        readerInjected = true;
+      }
       if (!cssInjected) {
+        // Paint the controls before page CSS can invalidate a huge document.
+        await chrome.scripting.executeScript({ target: { tabId }, func: () => new Promise(resolve => {
+          const timer = setTimeout(resolve, 100);
+          requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+        }) });
+        await chrome.scripting.removeCSS({ target: { tabId }, files: ['page.css'] });
         await chrome.scripting.insertCSS({ target: { tabId }, files: ['page.css'] });
         cssInjected = true;
       }
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js'] });
       return;
     } catch (error) {
       lastError = error;

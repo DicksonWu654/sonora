@@ -81,3 +81,11 @@ test('a short opening inside a long code line preserves code passage offsets and
   for (const part of queue) assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
   assert.equal(queue.at(-1).text, 'return values;');
 });
+
+test('already clean ASCII chunks and code retain normalization through the allocation shortcut', () => {
+  for (const [input, expected] of [
+    ['Clean prose.', 'Clean prose.'], ['line one\nline two\n\nnext paragraph', 'line one\nline two\n\nnext paragraph'],
+    [' two  spaces \n next\tline\r\n\n\nend ', 'two spaces\nnext line\n\nend'],
+    ['office \ufb03 cafe\u0301\u200b', 'office ffi café'], ['\n\n', ''], ['x\u0000y', 'xy']
+  ]) assert.equal(cleanText(input), expected);
+});

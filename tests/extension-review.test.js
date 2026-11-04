@@ -27,6 +27,7 @@ async function install(page) {
   for (const file of ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js']) {
     await page.evaluate(fs.readFileSync(path.join(__dirname, '../extension', file), 'utf8'));
   }
+  await page.evaluate('window.__sonoraOverlay.whenIndexed');
 }
 
 const lastRender = `messages.findLast(message => message.type === 'sonora-render')?.text`;

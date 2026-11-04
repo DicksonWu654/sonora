@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.5';
+  const OVERLAY_VERSION = '0.4.6';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -29,21 +29,23 @@
   let orderedEntriesDirty = false;
   let characterCount = 0;
   let entryCount = 0;
+  let codeEntryCount = 0;
   let domRevision = 0;
   const extractionCache = new WeakMap();
   const dirtyTextNodes = new WeakSet();
+  const textVersions = new WeakMap();
   const source = findReadableSource();
-  let pageText = cleanText(source.text).slice(0, MAX_PAGE_CHARS);
+  let pageText = '';
   let blockEntries = [];
   const root = document.createElement('div');
   root.id = 'sonora-overlay-root';
   const shadow = root.attachShadow({ mode: 'closed' });
   const panelMarkup = `
     <style>
-      :host { all: initial; }
+      :host { all: initial; position: fixed; inset: 0; z-index: 2147483647; contain: strict; pointer-events: none; }
       * { box-sizing: border-box; }
       .panel, button, select { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; color: #eff2ec; background: #121815f7; border: 1px solid #354239; border-radius: 12px; box-shadow: 0 18px 70px #000b, 0 2px 12px #0008; backdrop-filter: blur(18px); }
+      .panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; color: #eff2ec; background: #121815f7; border: 1px solid #354239; border-radius: 12px; box-shadow: 0 18px 70px #000b, 0 2px 12px #0008; backdrop-filter: blur(18px); }
       .panel.is-hidden { display: none; }
       .word-mark { position: fixed; z-index: 2147483646; pointer-events: none; border-radius: 2px; background: rgba(239, 201, 135, .65); box-shadow: inset 0 -2px #b27635; }
       .top { display: flex; align-items: center; gap: 10px; padding: 15px 16px 13px; border-bottom: 1px solid #2d3930; }
@@ -117,6 +119,10 @@
   const state = {
     index: -1,
     queue: [],
+    queueIterator: null,
+    queueOffset: 0,
+    queueBlocks: null,
+    queueStart: null,
     rendered: new Map(),
     renderRequests: new Map(),
     ready: false,
@@ -159,6 +165,9 @@
   let docsHover = null;
   let codeHoverPoint = null;
   let codeHoverFrame = null;
+  let codeHoverTimer = null, codeScrollTimer = null, codeScrolling = false;
+  let clickRevision = 0;
+  const priorityReaders = new Map();
   els.audio.preservesPitch = true;
   applySpeed(els.speed.value);
 
@@ -214,47 +223,84 @@
     });
   }
   const markedNodes = new Set();
+  const codeMarks = new Map();
   function clearCurrentBlock() {
     markedNodes.forEach(node => node.classList.remove(currentClass));
     markedNodes.clear();
     window.CSS?.highlights?.delete('sonora-current-code');
+    codeMarks.get('sonora-current-code')?.forEach(node => node.remove()); codeMarks.delete('sonora-current-code');
   }
   function markCodePart(entry, part, name) {
-    const highlights = window.CSS?.highlights;
-    if (!highlights || !window.Highlight) return;
+    const previous = codeMarks.get(name) || [];
+    previous.forEach(node => node.remove()); codeMarks.delete(name);
     const range = part && codeRange(entry, part.offset, part.text.length);
-    if (range) {
-      const highlight = new Highlight(range);
-      highlight.priority = name === 'sonora-current-code' ? 1 : 0;
-      highlights.set(name, highlight);
-    } else highlights.delete(name);
+    if (!range) {
+      if (part && codeRange.pending && name === 'sonora-hover-code') scheduleCodeHover(true);
+      return;
+    }
+    // A highlight style inherited through a 20,000-line syntax tree forces
+    // Chromium to restyle every span. Small range rectangles avoid that cost.
+    const boxes = [];
+    const clip = window.SonoraWords.clipFor(entry, document);
+    for (const bounds of range.getClientRects()) {
+      const rect = { left: Math.max(clip.left, bounds.left), top: Math.max(clip.top, bounds.top),
+        right: Math.min(clip.right, bounds.right), bottom: Math.min(clip.bottom, bounds.bottom) };
+      rect.width = rect.right - rect.left; rect.height = rect.bottom - rect.top;
+      if (rect.height <= 0 || rect.width <= 0) continue;
+      const box = document.createElement('div'); box.className = 'word-mark';
+      Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`,
+        background: name === 'sonora-current-code' ? 'rgba(216,178,139,.32)' : 'rgba(216,178,139,.18)' });
+      shadow.append(box); boxes.push(box);
+    }
+    codeMarks.set(name, boxes);
   }
   function codePartAt(entry, x, y) {
-    const bounds = entry.contentNode.getBoundingClientRect();
+    const bounds = window.SonoraWords.clipFor(entry, document);
     if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
     const offset = codeRange.offsetAt(entry, x, y);
     if (offset === null) return null;
-    let low = 0, high = entry.parts.length;
-    while (low < high) {
-      const middle = (low + high) >> 1;
-      if (entry.parts[middle].offset <= offset) low = middle + 1;
-      else high = middle;
+    return codePartForOffset(entry, offset);
+  }
+  function codePartForOffset(entry, offset) {
+    const line = Math.max(0, entry.text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1);
+    let from = line;
+    if (offset - line > 1200) {
+      from = Math.max(line, offset - 600);
+      const boundary = entry.text.slice(from, offset).search(/\s+\S*$/u);
+      if (boundary >= 0) from += boundary + 1;
+      if (/[\udc00-\udfff]/.test(entry.text[from])) from--;
     }
-    return entry.parts[Math.max(0, low - 1)] || null;
+    const parts = window.SonoraPassages.codePassages(entry.text.slice(from, from + 2400), chunksFor);
+    const part = parts.findLast(part => part.offset <= offset - from) || parts[0];
+    return part ? { text: part.text, offset: from + part.offset } : null;
   }
 
   function updateCodeHover() {
+    if (!codeEntryCount) return;
+    const current = currentEntry(), item = state.queue[state.index];
+    if (codeScrolling) {
+      markCodePart(null, null, 'sonora-current-code');
+      markCodePart(null, null, 'sonora-hover-code');
+      return;
+    }
+    if (current?.kind === 'code' && item && !codeMarks.has('sonora-current-code')) markCodePart(current, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
     const point = codeHoverPoint;
-    const block = point && document.elementFromPoint(point.x, point.y)?.closest('.sonora-code-block');
+    const block = point && (point.block === undefined ? document.elementFromPoint(point.x, point.y)?.closest('.sonora-code-block') : point.block);
     const entry = block && entriesByNode.get(block);
     markCodePart(entry, entry && codePartAt(entry, point.x, point.y), 'sonora-hover-code');
   }
-  function scheduleCodeHover() {
-    if (codeHoverFrame !== null) return;
-    codeHoverFrame = requestAnimationFrame(() => {
-      codeHoverFrame = null;
-      updateCodeHover();
-    });
+  function scheduleCodeHover(immediate = false) {
+    if (!codeEntryCount) return;
+    const schedule = () => {
+      codeHoverTimer = null;
+      if (codeHoverFrame !== null || state.closed) return;
+      codeHoverFrame = requestAnimationFrame(() => { codeHoverFrame = null; updateCodeHover(); });
+    };
+    if (immediate) schedule();
+    else {
+      if (codeHoverTimer !== null) clearTimeout(codeHoverTimer);
+      codeHoverTimer = setTimeout(schedule, 80);
+    }
   }
   function currentEntry() {
     const item = state.queue[state.index];
@@ -301,8 +347,8 @@
     if (!AudioContextClass) return null;
     try {
       if (!state.audioContext) state.audioContext = new AudioContextClass();
-      // Calling resume during the user's click keeps the context usable after
-      // the asynchronous local render completes.
+      // Chromium permits playback after the page's sticky user activation.
+      // The first text click supplies it before synthesis completes.
       state.audioContext.resume().catch(() => {});
       return state.audioContext;
     } catch {
@@ -449,10 +495,9 @@
     for (let at = blockIndex; at < blockEntries.length && remaining > 0; at++) {
       const entry = blockEntries[at];
       const blockText = entry.text.slice(0, remaining);
-      const pieces = entry.kind === 'code' ? null : chunksFor(blockText, 1200);
-      const offsets = pieces && window.SonoraWords.chunkOffsets(blockText, pieces);
-      const chunks = entry.kind === 'code' ? (blockText.length === entry.text.length ? entry.parts : window.SonoraPassages.codePassages(blockText, chunksFor))
-        : pieces.map((text, at) => ({ text, offset: offsets[at] }));
+      const pieces = chunksFor(blockText, 1200);
+      const offsets = window.SonoraWords.chunkOffsets(blockText, pieces);
+      const chunks = pieces.map((text, at) => ({ text, offset: offsets[at] }));
       chunks.filter(part => entry.index !== blockIndex || part.offset >= blockOffset)
         .forEach(part => queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset }));
       remaining -= blockText.length;
@@ -465,6 +510,44 @@
     }
     return queue;
   }
+  function* lazyQueue(entry, offset = 0) {
+    // Snapshot discovered blocks, but split only the current/next passage. The
+    // selected block is always first, even while background discovery runs.
+    const selected = { ...entry };
+    const following = [...entriesByKey.values()].filter(other => other.node !== entry.node
+      && (entry.node.compareDocumentPosition(other.node) & Node.DOCUMENT_POSITION_FOLLOWING));
+    following.sort((a, b) => a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    const snapshot = state.queueBlocks = [selected, ...following.map(block => ({ ...block }))];
+    let opening = true;
+    for (let at = 0; at < snapshot.length || !indexingDone; at++) {
+      if (at >= snapshot.length) { yield null; at--; continue; }
+      const block = snapshot[at];
+      let cursor = block === selected ? offset : 0;
+      while (cursor < block.text.length || block.partial) {
+        if (cursor >= block.text.length || !opening && block.partial && block.text.length - cursor < 1201) { yield null; continue; }
+        while (/\s/u.test(block.text[cursor] || '') && cursor < block.text.length) cursor++;
+        if (cursor >= block.text.length) break;
+        const part = window.SonoraPassages.nextPart(block.text, cursor, block.kind === 'code', chunksFor, opening ? window.BookText.openingChunksFor : null);
+        if (!part) break;
+        opening = false;
+        yield { text: part.text, blockKey: block.key, blockIndex: block.index, blockOffset: part.offset };
+        cursor = part.offset + part.text.length;
+      }
+    }
+  }
+  function fillQueue() {
+    if (!state.queueIterator) return;
+    while (state.queue.length < state.index + 3) {
+      const next = state.queueIterator.next();
+      if (next.done) { state.queueIterator = null; break; }
+      if (!next.value) break;
+      state.queue.push(next.value);
+    }
+  }
+  function passageLabel(index = state.index) {
+    const number = state.queueOffset + index + 1;
+    return state.queueIterator ? String(number) : `${number} of ${state.queueOffset + state.queue.length}`;
+  }
   function render(index) {
     const item = state.queue[index];
     if (!item) return Promise.reject(new Error('No readable passage is selected.'));
@@ -473,14 +556,16 @@
     const promise = message({ type: 'sonora-render', requestId, text: item.text, voice: els.voice.value });
     state.rendered.set(index, promise);
     state.renderRequests.set(index, requestId);
-    promise.catch(() => { if (state.rendered.get(index) === promise) state.rendered.delete(index); })
-      .finally(() => { if (state.renderRequests.get(index) === requestId) state.renderRequests.delete(index); });
+    promise.catch(() => { for (const [at, value] of state.rendered) if (value === promise) state.rendered.delete(at); })
+      .finally(() => { for (const [at, id] of state.renderRequests) if (id === requestId) state.renderRequests.delete(at); });
     return promise;
   }
   const renderReadyListener = payload => {
     if (state.closed || payload?.type !== 'sonora-render-ready') return;
     if (state.renderRequests.get(state.index) !== payload.requestId) return;
     if (state.index + 1 < state.queue.length) render(state.index + 1).catch(() => {});
+    // Audio service setup must not delay sending the first render request.
+    if (!state.audioContext) primeAudioContext();
   };
   chrome.runtime.onMessage?.addListener(renderReadyListener);
   function cancelRender(index) {
@@ -499,6 +584,7 @@
     }
   }
   async function play(index = state.index < 0 ? 0 : state.index) {
+    fillQueue();
     const item = state.queue[index];
     if (!item || !state.ready) return;
     const revision = ++state.revision;
@@ -516,7 +602,7 @@
     markCurrentBlock(item.blockIndex, item.blockKey);
     updateTransport();
     els.track.style.width = '0%';
-    setStatus(`Rendering passage ${index + 1} of ${state.queue.length}…`, 'busy');
+    setStatus(`Rendering passage ${passageLabel(index)}…`, 'busy');
     try {
       const result = await render(index);
       if (revision !== state.revision) return;
@@ -553,7 +639,7 @@
       state.pendingRender = false;
       state.playing = true;
       startWordFrames();
-      setStatus(`Playing passage ${index + 1} of ${state.queue.length}`, 'ready');
+      setStatus(`Playing passage ${passageLabel(index)}`, 'ready');
       updateTransport();
       if (index + 1 < state.queue.length) render(index + 1).catch(() => {});
     } catch (error) {
@@ -564,17 +650,25 @@
       setStatus(error.name === 'NotAllowedError' ? 'Audio is ready. Press play to start.' : error.message, 'error');
     }
   }
-  function startQueue(blockIndex = 0, blockOffset = 0) {
+  function startQueue(blockIndex = 0, blockOffset = 0, clickedEntry = null) {
     const selected = state.queue[state.index];
     if (state.pendingRender && selected?.blockKey === blockEntries[blockIndex]?.key && selected.blockOffset === blockOffset) return;
-    const queue = queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset, true);
+    if (!clickedEntry) ensureOrderedEntries();
+    const entry = clickedEntry || blockEntries[blockIndex];
+    state.queueIterator = !isGoogleDocsPage() && entry ? lazyQueue(entry, blockOffset) : null;
+    state.queueOffset = 0;
+    state.queueBlocks = null;
+    const queue = state.queueIterator ? [] : queueFrom(blockIndex, MAX_PAGE_CHARS, blockOffset, true);
+    if (state.queueIterator) { const first = state.queueIterator.next(); if (!first.done && first.value) queue.push(first.value); }
     if (!queue.length) {
       setStatus(isGoogleDocsPage() ? readyMessage() : 'No readable text was found in that block.', 'error');
       return;
     }
-    primeAudioContext();
     state.revision++;
     state.queue = queue;
+    state.queueStart = entry ? { entry: state.queueBlocks?.[0] || entry, offset: blockOffset } : null;
+    state.index = 0;
+    fillQueue();
     const startIndex = 0;
     cancelRendered();
     state.index = -1;
@@ -600,6 +694,7 @@
     }
   }
   function stop() {
+    clickRevision++;
     resetWords();
     state.revision++;
     cancelRendered();
@@ -664,20 +759,53 @@
     }
     const entry = entriesByNode.get(block);
     if (!entry) return;
+    const token = ++clickRevision;
+    if (entry.kind === 'code' && entry.partial && event.detail !== 0) {
+      const offset = codeRange.offsetAt(entry, event.clientX, event.clientY);
+      if (offset !== null && offset >= entry.text.length - 1200) {
+        completeClickedEntry(entry).then(() => {
+          if (state.closed || token !== clickRevision || !entry.node.isConnected) return;
+          const part = codePartForOffset(entry, offset);
+          if (part) startQueue(entry.index, part.offset, entry);
+        }).catch(error => { if (!state.closed && token === clickRevision) setStatus(error.message, 'error'); });
+        return;
+      }
+    }
     const part = entry.kind === 'code' && event.detail !== 0 ? codePartAt(entry, event.clientX, event.clientY) : null;
     if (entry.kind === 'code' && event.detail !== 0 && !part) return;
     if (isGoogleDocsPage()) {
       event.preventDefault();
       event.stopPropagation();
     }
-    ensureOrderedEntries();
-    startQueue(entry.index, part?.offset || 0);
+    startQueue(entry.index, part?.offset || 0, entry);
+  }
+  function completeClickedEntry(entry) {
+    if (priorityReaders.has(entry.node)) return priorityReaders.get(entry.node);
+    const reader = window.SonoraPassages.createTextReader(entry.contentNode || entry.node, cleanText);
+    const task = new Promise(resolve => {
+      function step() {
+        if (state.closed || !entry.node.isConnected) { resolve(); return; }
+        const result = reader.advance(3);
+        if (result.done) {
+          characterCount += result.text.length - entry.text.length;
+          Object.assign(entry, { text: result.text, partial: false, domRevision: ++domRevision });
+          extractionCache.set(entry.node, { text: result.text, revision: entry.domRevision });
+          dirtyTextNodes.delete(entry.node);
+          resolve(); return;
+        }
+        if (globalThis.scheduler?.postTask) scheduler.postTask(step, { priority: 'user-blocking' }).catch(() => resolve());
+        else setTimeout(step, 0);
+      }
+      step();
+    }).finally(() => priorityReaders.delete(entry.node));
+    priorityReaders.set(entry.node, task);
+    return task;
   }
   function updateBlocks(nextBlocks, navigated = false) {
     const nextEntries = makeBlockEntries(nextBlocks);
     entriesByKey.clear();
     entriesByScope.clear();
-    characterCount = entryCount = 0;
+    characterCount = entryCount = codeEntryCount = 0;
     nextEntries.forEach(indexEntry);
     const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
     const activeEntry = activeItem && nextEntries.find(entry => entry.key === activeItem.blockKey);
@@ -749,6 +877,7 @@
     entriesByScope.get(entry.scope).push(entry);
     characterCount += entry.text.length;
     entryCount++;
+    if (entry.kind === 'code') codeEntryCount++;
   }
   function ensureOrderedEntries() {
     if (!orderedEntriesDirty) return;
@@ -758,8 +887,9 @@
     orderedEntriesDirty = false;
   }
   function updateMeta() {
+    if (!codeEntryCount) { codeMarks.forEach(boxes => boxes.forEach(box => box.remove())); codeMarks.clear(); }
     const size = characterCount + Math.max(0, entryCount - 1) * 2;
-    els.meta.textContent = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
+    els.meta.textContent = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${isGoogleDocsPage() && size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
   }
 
   function refreshBlocks() {
@@ -773,6 +903,7 @@
         previous.forEach(entry => {
           characterCount -= entry.text.length;
           entryCount--;
+          if (entry.kind === 'code') codeEntryCount--;
           entriesByKey.delete(entry.key);
           entriesByNode.delete(entry.node);
           knownBlocks.delete(entry.node);
@@ -801,7 +932,7 @@
     }
     dirtyScopes.clear();
     fullRefreshPending = false;
-    if (navigated) { orderedEntriesDirty = false; pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
+    if (navigated) { stop(); state.queue = []; state.queueIterator = state.queueBlocks = state.queueStart = null; orderedEntriesDirty = false; pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
     if (sourceUrl !== location.href || !source.root?.isConnected) {
       const nextSource = findReadableSource();
       sourceUrl = location.href;
@@ -812,18 +943,21 @@
       source.noiseSelector = nextSource.noiseSelector;
       els.title.textContent = source.title || document.title || 'Untitled page';
     }
+    if (!isGoogleDocsPage()) { discoverPage(); return; }
     ensureOrderedEntries();
     knownBlocks.forEach(node => dirtyTextNodes.add(node));
     const nextBlocks = selectReadableBlocks(source.root, source.noiseSelector);
     updateBlocks(nextBlocks, navigated);
   }
   function scheduleBlockRefresh(records) {
+    wordTracker.invalidate();
     const mutations = records && typeof records[Symbol.iterator] === 'function';
     if (mutations) {
       for (const record of records) {
         let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
         while (node && source.root?.contains(node)) {
           dirtyTextNodes.add(node);
+          textVersions.set(node, (textVersions.get(node) || 0) + 1);
           if (node === source.root) break;
           node = node.parentElement;
         }
@@ -852,7 +986,91 @@
     if (refreshTimer) return;
     refreshTimer = setTimeout(refreshBlocks, 100);
   }
-  updateBlocks(source.blocks);
+  let discoveryHandle = null, discoveryGeneration = 0, indexingDone = false;
+  let finishDiscovery;
+  const whenIndexed = new Promise(resolve => { finishDiscovery = resolve; });
+  function removeEntries(predicate) {
+    const scopes = new Set();
+    for (const [key, entry] of entriesByKey) {
+      if (!predicate(entry)) continue;
+      entriesByKey.delete(key); entriesByNode.delete(entry.node); knownBlocks.delete(entry.node);
+      entry.node.classList.remove(pageClass, currentClass, 'sonora-code-block');
+      characterCount -= entry.text.length; entryCount--; if (entry.kind === 'code') codeEntryCount--; scopes.add(entry.scope);
+    }
+    for (const scope of scopes) {
+      const remaining = entriesByScope.get(scope)?.filter(entry => entriesByKey.has(entry.key));
+      if (remaining?.length) entriesByScope.set(scope, remaining); else entriesByScope.delete(scope);
+    }
+    blockEntries = blockEntries.filter(entry => entriesByKey.has(entry.key));
+  }
+  function discoverPage() {
+    if (isGoogleDocsPage()) { updateBlocks(source.blocks); finishDiscovery(); return; }
+    if (discoveryHandle !== null) clearTimeout(discoveryHandle);
+    const generation = ++discoveryGeneration;
+    removeEntries(entry => !entry.node.isConnected || !source.root?.contains(entry.node));
+    const seenNodes = new Set();
+    const existing = new Map([...entriesByKey.values()].map(entry => [entry.node, entry.domRevision]));
+    const candidates = window.SonoraPassages.blockCandidates(source.root, source.noiseSelector);
+    let reading = null;
+    function batch() {
+      discoveryHandle = null;
+      if (state.closed || generation !== discoveryGeneration) return;
+      if (priorityReaders.size) { discoveryHandle = setTimeout(batch, 16); return; }
+      const started = performance.now();
+      do {
+        if (reading && !reading.node.isConnected) reading = null;
+        if (reading && entriesByNode.has(reading.node) && !entriesByNode.get(reading.node).partial && !dirtyTextNodes.has(reading.node)) reading = null;
+        if (reading) {
+          const result = reading.reader.advance(2);
+          if (!result.done) break;
+          const { node } = reading;
+          if (reading.version !== (textVersions.get(node) || 0)) {
+            reading = { node, version: textVersions.get(node) || 0, reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
+            break;
+          }
+          if (!node.isConnected) { reading = null; continue; }
+          extractionCache.set(node, { text: result.text, revision: ++domRevision });
+          dirtyTextNodes.delete(node);
+          const old = entriesByNode.get(node);
+          if (old) {
+            const updated = makeIncomingEntries([node])[0];
+            if (!updated) { removeEntries(entry => entry === old); reading = null; continue; }
+            characterCount -= old.text.length;
+            Object.assign(old, updated);
+            characterCount += old.text.length;
+            const active = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
+            if (active?.blockKey === old.key && !window.SonoraPassages.matchesPassage(old, active)) { stop(); state.queue = []; setStatus('This passage changed — click it to read the updated text.', 'ready'); }
+            const snapshot = state.queueBlocks?.find(block => block.key === old.key);
+            if (snapshot?.partial && old.text.startsWith(snapshot.text)) Object.assign(snapshot, { text: old.text, partial: false });
+          } else addDiscovered(node);
+          reading = null;
+        } else {
+          const next = candidates.next();
+          if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); updateMeta(); return; }
+          const node = next.value;
+          if (!window.SonoraPassages.visibleBlock(node)) continue;
+          seenNodes.add(node);
+          if (entriesByNode.has(node) && !entriesByNode.get(node).partial && !dirtyTextNodes.has(node)) continue;
+          reading = { node, version: textVersions.get(node) || 0, reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
+        }
+      } while (performance.now() - started < 4);
+      updateMeta();
+      discoveryHandle = setTimeout(batch, 0);
+    }
+    function addDiscovered(node) {
+      for (const entry of reconcileEntries([], makeIncomingEntries([node]))) {
+        entry.index = blockEntries.length;
+        indexEntry(entry); blockEntries.push(entry);
+        node.classList.add(pageClass); node.classList.toggle('sonora-code-block', entry.kind === 'code'); knownBlocks.add(node);
+        const snapshot = state.queueBlocks;
+        if (snapshot && (snapshot[0].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && !snapshot.some(block => block.key === entry.key)) snapshot.push({ ...entry });
+      }
+    }
+    // Give the panel its first paint and install click handlers before indexing.
+    discoveryHandle = setTimeout(batch, 50);
+  }
+  discoverPage();
   source.blocks = [];
   const pageClickListener = event => {
     if (!(event.target instanceof Element)) return;
@@ -866,13 +1084,35 @@
       if (entry) { event.preventDefault(); event.stopPropagation(); }
       return;
     }
-    const block = event.target.closest(`.${pageClass}`);
-    if (!block || !source.root?.contains(block)) return;
+    let block = event.target.closest(`.${pageClass}`) || event.target.closest(window.SonoraPassages.blockSelector);
+    if (!block) {
+      for (let node = event.target; node && source.root?.contains(node); node = node.parentElement) {
+        if ((node.matches('div,section,span') || node === source.root) && !node.querySelector(window.SonoraPassages.blockSelector)
+          && [...node.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data))) block = node;
+        if (node === source.root) break;
+      }
+    }
+    if (!block || !source.root?.contains(block) || block.closest(source.noiseSelector)) return;
+    if (!entriesByNode.has(block)) {
+      for (const entry of reconcileEntries([], makeIncomingEntries([block], 2400))) {
+        entry.index = blockEntries.length;
+        indexEntry(entry); blockEntries.push(entry); knownBlocks.add(block);
+        block.classList.add(pageClass);
+        block.classList.toggle('sonora-code-block', entry.kind === 'code');
+      }
+    }
     handlePageClick(event, block);
   };
   document.addEventListener('click', pageClickListener, true);
   const docsPointerDownListener = event => {
-    if (!isGoogleDocsPage() || event.target === root) return;
+    if (event.target === root) return;
+    if (!isGoogleDocsPage()) {
+      const target = event.target instanceof Element ? event.target : null;
+      const code = target?.closest('pre');
+      if (event.button === 0 && code && source.root?.contains(code) && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+        && !target.closest('button,input,textarea,select,[role="button"],a,[role="link"]')) event.preventDefault();
+      return;
+    }
     const surface = googleDocsSurface(source.root);
     if (!surface?.closest('.kix-appview-editor')?.contains(event.target)) return;
     const entry = window.SonoraDocs.hitTest(blockEntries, event.clientX, event.clientY);
@@ -881,7 +1121,9 @@
   document.addEventListener('pointerdown', docsPointerDownListener, true);
   const docsPointerListener = event => {
     if (!isGoogleDocsPage()) {
-      codeHoverPoint = { x: event.clientX, y: event.clientY };
+      if (!codeEntryCount) return;
+      const target = event.target instanceof Element ? event.target : null;
+      codeHoverPoint = { x: event.clientX, y: event.clientY, block: target ? target.closest('.sonora-code-block') : undefined };
       scheduleCodeHover();
       return;
     }
@@ -894,8 +1136,15 @@
   };
   document.addEventListener('pointermove', docsPointerListener, true);
   const wordPositionListener = () => {
+    wordTracker.invalidate();
     if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord();
-    if (!isGoogleDocsPage()) scheduleCodeHover();
+    if (!isGoogleDocsPage() && codeEntryCount) {
+      codeScrolling = true;
+      if (codeHoverPoint) codeHoverPoint.block = undefined;
+      if (codeScrollTimer !== null) clearTimeout(codeScrollTimer);
+      codeScrollTimer = setTimeout(() => { codeScrollTimer = null; codeScrolling = false; scheduleCodeHover(true); }, 80);
+      scheduleCodeHover(true);
+    }
   };
   document.addEventListener('scroll', wordPositionListener, true);
   window.addEventListener('resize', wordPositionListener);
@@ -940,7 +1189,7 @@
         state.playing = true;
         startWordFrames();
         updateTransport();
-        setStatus(`Playing passage ${state.index + 1} of ${state.queue.length}`, 'ready');
+        setStatus(`Playing passage ${passageLabel()}`, 'ready');
       }).catch(error => {
         if (revision === state.revision && !state.closed) setStatus(error.message, 'error');
       });
@@ -951,15 +1200,21 @@
         state.playing = true;
         startWordFrames();
         updateTransport();
-        setStatus(`Playing passage ${state.index + 1} of ${state.queue.length}`, 'ready');
+        setStatus(`Playing passage ${passageLabel()}`, 'ready');
       }).catch(error => {
         if (revision === state.revision && !state.closed) setStatus(error.message, 'error');
       });
+    } else if (state.queue.length && !isGoogleDocsPage() && state.queueStart && (state.completed || state.index < 0)) {
+      const { entry, offset } = state.queueStart;
+      startQueue(entry.index, offset, entriesByKey.get(entry.key) || entry);
     } else if (state.queue.length) {
       const resumeIndex = state.index >= 0 && !state.completed ? state.index : 0;
       state.pendingStart = resumeIndex;
       if (state.ready) { state.pendingStart = null; play(resumeIndex); }
       else setStatus('Waiting for the local voice to finish warming up…', 'busy');
+    } else if (!blockEntries.length && !indexingDone) {
+      setStatus('Finding the first passage…', 'busy');
+      whenIndexed.then(() => { if (!state.closed && !state.queue.length) startQueue(0); });
     } else startQueue(0);
   });
   els.stop.addEventListener('click', stop);
@@ -979,7 +1234,18 @@
   function advanceQueue(revision = state.revision) {
     if (revision !== state.revision) return;
     state.playing = false;
-    if (state.index + 1 < state.queue.length) play(state.index + 1);
+    fillQueue();
+    if (state.index + 1 < state.queue.length) {
+      if (state.index >= 31 && !isGoogleDocsPage()) {
+        const removed = state.index + 1;
+        state.queue.splice(0, removed);
+        state.queueOffset += removed;
+        state.rendered = new Map([...state.rendered].filter(([index]) => index >= removed).map(([index, value]) => [index - removed, value]));
+        state.renderRequests = new Map([...state.renderRequests].filter(([index]) => index >= removed).map(([index, value]) => [index - removed, value]));
+        state.index = -1;
+      }
+      play(state.index + 1);
+    }
     else {
       state.pendingRender = false;
       state.completed = true;
@@ -1022,7 +1288,11 @@
   els.minimize.addEventListener('click', () => els.panel.classList.toggle('is-hidden'));
   els.close.addEventListener('click', () => {
     resetWords();
+    wordTracker.reset(true); codeRange.reset();
+    state.queueIterator = null; state.queueBlocks = state.queueStart = null; state.queue = [];
+    entriesByKey.clear(); entriesByScope.clear(); blockEntries = pageEntries = [];
     state.closed = true;
+    clickRevision++;
     state.revision++;
     cancelRendered();
     els.audio.pause();
@@ -1040,32 +1310,38 @@
     window.removeEventListener('popstate', scheduleBlockRefresh);
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (discoveryHandle !== null) clearTimeout(discoveryHandle);
+    discoveryGeneration++;
     if (codeHoverFrame !== null) cancelAnimationFrame(codeHoverFrame);
+    if (codeHoverTimer !== null) clearTimeout(codeHoverTimer);
+    if (codeScrollTimer !== null) clearTimeout(codeScrollTimer);
     clearInterval(navigationTimer);
     if (state.voiceTimer) clearTimeout(state.voiceTimer);
     knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block'));
     window.CSS?.highlights?.delete('sonora-hover-code');
+    codeMarks.forEach(boxes => boxes.forEach(box => box.remove())); codeMarks.clear();
     clearCurrentBlock();
     root.remove();
     delete window.__sonoraOverlay;
   });
   window.__sonoraOverlay = {
     version: OVERLAY_VERSION,
+    whenIndexed,
     toggle: () => els.panel.classList.toggle('is-hidden'),
     dispose: () => els.close.click()
   };
   loadSettings();
   checkVoice();
 
-  function readableText(node) {
+  function readableText(node, limit = Infinity) {
     if (!node) return '';
     const cached = extractionCache.get(node);
-    if (cached && !dirtyTextNodes.has(node)) return cached.text;
+    if (cached && !dirtyTextNodes.has(node) && (!cached.partial || limit < Infinity)) return cached.text;
     const contentNode = node.matches?.('pre') ? node.querySelector('code') || node : node;
     const text = isGoogleDocsPage() && contentNode.matches?.('g[role="paragraph"]')
       ? cleanText([...contentNode.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '))
-      : window.SonoraPassages.readableText(contentNode, cleanText);
-    extractionCache.set(node, { text, revision: ++domRevision });
+      : window.SonoraPassages.readableText(contentNode, cleanText, limit);
+    extractionCache.set(node, { text, revision: ++domRevision, partial: limit < Infinity && contentNode.textContent.length >= limit });
     dirtyTextNodes.delete(node);
     return text;
   }
@@ -1096,15 +1372,14 @@
     return pageEntries;
   }
 
-  function makeIncomingEntries(nodes) {
+  function makeIncomingEntries(nodes, limit = Infinity) {
     return nodes.map(node => {
-      const text = readableText(node);
+      const text = readableText(node, limit);
       const cached = extractionCache.get(node);
-      if (node.matches('pre') && !cached.parts) cached.parts = window.SonoraPassages.codePassages(text, chunksFor);
-      return { node, text, domRevision: cached.revision, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
-        ? { kind: 'code', contentNode: node.querySelector('code') || node, parts: cached.parts } : {}) };
+      return { node, text, useRectangles: isChatGPTPage(), partial: Boolean(cached.partial), domRevision: cached.revision, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
+        ? { kind: 'code', contentNode: node.querySelector('code') || node } : {}) };
     })
-      .filter(entry => entry.kind === 'code' ? entry.parts.length > 0
+      .filter(entry => entry.kind === 'code' ? entry.partial || /[\p{L}\p{N}]/u.test(entry.text)
         : entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
   }
 
@@ -1114,78 +1389,11 @@
       const surface = googleDocsSurface(root);
       return surface ? [...surface.querySelectorAll('svg g[role="paragraph"]')].filter(node => node.querySelector('rect[aria-label]')) : [];
     }
-    const semanticSelector = 'p, h1, h2, h3, h4, h5, h6, blockquote, pre, td, th, caption, li, dt, dd, [role="cell"], [role="gridcell"]';
-    const customSelector = [
-      '.kix-paragraphrenderer', '.kix-lineview', '.kix-lineview-content', '.kix-page',
-      '[data-block-id]', '[data-slate-node="element"]', '[data-lexical-node="true"]',
-      '[data-testid*="paragraph" i]', '[role="heading"]', '[role="paragraph"]', '[role="article"]', '[role="listitem"]'
-    ].join(',');
-    const accessibleTextSelector = [
-      '.kix-wordhtmlgenerator-word-node', '.kix-lineview-text-block', '[role="text"]',
-      'span[aria-label]', '[aria-label]:not([role="button"])'
-    ].join(',');
-    const semantic = [...root.querySelectorAll(semanticSelector)];
-    const googleParagraphs = [...root.querySelectorAll('.kix-paragraphrenderer')];
-    const googleLines = [...root.querySelectorAll('.kix-lineview')];
-    const googleLineContent = [...root.querySelectorAll('.kix-lineview-content')];
-    const googlePages = [...root.querySelectorAll('.kix-page')];
-    const custom = [...root.querySelectorAll(customSelector)]
-      .filter(node => !node.matches('.kix-lineview, .kix-paragraphrenderer'));
-    const googleBlocks = googleParagraphs.length ? googleParagraphs
-      : googleLines.length ? googleLines
-        : googleLineContent.length ? googleLineContent
-          : googlePages;
-    const raw = [...new Set([...semantic, ...googleBlocks, ...custom])];
-    const blocks = raw.filter(block => {
-      if (block.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(block)) return false;
-      if (window.SonoraPassages.isCodeChrome(block, root)) return false;
-      if (!block.matches('pre') && block.closest('pre')) return false;
-      const value = readableText(block);
-      if (value.length <= (block.matches('pre, td, th, [role="cell"], [role="gridcell"]') ? 0 : 1)) return false;
-      if (block.matches('pre') && !/[\p{L}\p{N}]/u.test(value)) return false;
-      if (block.matches('.kix-page') && (googleParagraphs.length || googleLines.length || googleLineContent.length)) return false;
-      if (block.matches('.kix-lineview') && block.closest('.kix-paragraphrenderer')) return false;
-      if (block.matches('.kix-lineview-content') && block.closest('.kix-lineview')) return false;
-      if (block.matches('p, h1, h2, h3, h4, h5, h6, blockquote, pre') && block.closest('td, th, [role="cell"], [role="gridcell"]')) return false;
-      if (block.matches('li, dt, dd') && block.querySelector('p, h1, h2, h3, h4, h5, h6, blockquote, pre')) return false;
-      if (block.matches('blockquote') && block.querySelector('p,blockquote')) return false;
-      if (block.matches(customSelector) && !block.matches('.kix-paragraphrenderer, .kix-page') && block.querySelector(`${semanticSelector}, ${customSelector}`)) return false;
-      return true;
-    });
-    const editable = root.matches?.('[contenteditable="true"]')
-      ? root
-      : root.querySelector?.('[contenteditable="true"]');
-    const generic = [...root.querySelectorAll('div, section')].filter(node => {
-      if (node.closest(noiseSelector) || node.closest('pre') || !window.SonoraPassages.visibleBlock(node)) return false;
-      if (window.SonoraPassages.isCodeChrome(node, root)) return false;
+    return [...window.SonoraPassages.blockCandidates(root, noiseSelector)].filter(node => {
+      if (!window.SonoraPassages.visibleBlock(node)) return false;
       const value = readableText(node);
-      const directText = cleanText([...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.nodeValue).join(' '));
-      return value.length > 1 && directText.length > 1 && !node.querySelector(semanticSelector);
+      return value.length > (node.matches('pre,td,th,[role="cell"],[role="gridcell"]') ? 0 : 1);
     });
-    const leafText = [...root.querySelectorAll('div, section, span')].filter(node => {
-      if (node.closest(noiseSelector) || node.closest('pre') || !window.SonoraPassages.visibleBlock(node)) return false;
-      if (window.SonoraPassages.isCodeChrome(node, root) || node.querySelector('div, section, span')) return false;
-      const value = readableText(node);
-      return value.length > 1 && !node.querySelector(semanticSelector);
-    });
-    const leafGeneric = generic.filter(node => !generic.some(parent => parent !== node && parent.contains(node)));
-    const uncoveredGeneric = [...leafGeneric, ...leafText.filter(node => !leafGeneric.some(parent => parent.contains(node)))].filter((node, index, all) => all.indexOf(node) === index)
-      .filter(node => !blocks.some(block => block.contains(node) || node.contains(block)));
-    const accessibleLeaves = [...root.querySelectorAll(accessibleTextSelector)].filter(node => {
-      if (node.closest(noiseSelector) || !window.SonoraPassages.visibleBlock(node)) return false;
-      const value = readableText(node);
-      if (value.length <= 1 || node.querySelector(accessibleTextSelector)) return false;
-      return true;
-    });
-    const pageOnlyGoogleBlocks = blocks.length > 0 && blocks.every(block => block.matches('.kix-page, .kix-lineview-content'));
-    if (pageOnlyGoogleBlocks && accessibleLeaves.length) return accessibleLeaves;
-    if (blocks.length || uncoveredGeneric.length) return [...blocks, ...uncoveredGeneric].sort((a, b) => a === b ? 0 : (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
-    if (accessibleLeaves.length) return accessibleLeaves;
-    if (editable && readableText(editable).length > 1 && !editable.closest(noiseSelector)) return [editable];
-    if (root.matches?.('.kix-appview-editor, #kix-appview-editor, [class*="kix-appview-editor"], #docs-editor, .docs-editor, [aria-label*="Document content" i], [role="textbox"]') && readableText(root).length > 1) return [root];
-    const rootDirectText = cleanText([...root.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.nodeValue).join(' '));
-    if (rootDirectText.length > 1 && readableText(root).length > 1 && !root.matches?.(noiseSelector)) return [root];
-    return leafGeneric;
   }
 
   function findReadableSource() {
@@ -1213,49 +1421,11 @@
         truncated: text.length > MAX_PAGE_CHARS
       };
     }
-    if (/^(chatgpt\.com|chat\.openai\.com)$/i.test(location.hostname)) {
-      const root = document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body;
-      const blocks = selectReadableBlocks(root, noiseSelector);
-      const text = blocks.map(readableText).filter(Boolean).join('\n\n');
-      return { root, blocks, text, noiseSelector, title: cleanText(document.title || 'ChatGPT'), truncated: text.length > MAX_PAGE_CHARS };
-    }
-    const selectors = [
-      '#mw-content-text .mw-parser-output', '#mw-content-text',
-      '.kix-appview-editor', '#kix-appview-editor', '[class*="kix-appview-editor"]', '#docs-editor', '.docs-editor',
-      '[aria-label*="Document content" i]', '[role="textbox"]', '[contenteditable="true"]', 'article', 'main', '[role="main"]',
-      '.post-content', '.article-content', '.entry-content', '.markdown-body', 'body'
-    ];
-    const candidates = [];
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach(node => {
-        if (candidates.some(candidate => candidate.node === node)) return;
-        const clone = node.cloneNode(true);
-        clone.querySelectorAll(noiseSelector).forEach(noise => noise.remove());
-        const blocks = selectReadableBlocks(node, noiseSelector);
-        const value = blocks.map(readableText).filter(Boolean).join('\n\n') || readableText(clone);
-        const meaningful = /^(?:main|article|\.post-content|\.article-content|\.entry-content|\.markdown-body|\[role="main"\])$/.test(selector);
-        if (value.length <= 80 && !meaningful) return;
-        const priority = selector.startsWith('#mw-content-text') ? 10000
-          : selector.includes('kix-') || selector.includes('docs-') ? 9000
-            : meaningful ? 5000 : 0;
-        const score = value.length + blocks.length * 180 + priority;
-        candidates.push({ node, value, blocks, score });
-      });
-      if (candidates.some(candidate => candidate.node.matches(selector) && candidate.value.length > 200)) break;
-    }
-    const best = candidates.sort((a, b) => b.score - a.score)[0];
-    const fallbackRoot = document.body || document.documentElement;
-    const fallbackBlocks = best?.blocks || selectReadableBlocks(fallbackRoot, noiseSelector);
-    const value = (best?.value || fallbackBlocks.map(readableText).filter(Boolean).join('\n\n') || readableText(fallbackRoot)).trim();
-    const titleNode = best?.node.querySelector('h1') || document.querySelector('h1');
-    const title = cleanText(titleNode?.innerText || document.title || '').replace(/\s+-\s+(Wikipedia|Wiktionary)$/i, '');
-    return {
-      text: value,
-      title,
-      root: best?.node || fallbackRoot,
-      blocks: fallbackBlocks,
-      noiseSelector,
-      truncated: value.length > MAX_PAGE_CHARS
-    };
+    const chat = isChatGPTPage();
+    const root = chat ? document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body
+      : document.querySelector('#mw-content-text .mw-parser-output, #mw-content-text')
+        || document.querySelector('article,main,[role="main"],.post-content,.article-content,.entry-content,.markdown-body')
+        || document.body || document.documentElement;
+    return { root, blocks: [], text: '', noiseSelector, title: cleanText(document.title || 'Untitled page') };
   }
 })();

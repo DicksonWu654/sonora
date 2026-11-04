@@ -11,23 +11,81 @@
     return [...node.getClientRects()].some(rect => rect.width > 1 && rect.height > 1);
   }
 
-  function readableText(node, cleanText) {
-    if (!node) return '';
-    if (!node.isConnected) return cleanText(node.textContent || '');
+  function createTextReader(node, cleanText) {
+    const parts = [];
+    let size = 0, done = false, text = '';
     const nestedList = node.matches('li') && node.querySelector('ul,ol,menu');
-    // Read the live layout without replacing page markup. Toolbars and hidden
-    // speaker labels can be nested inside an otherwise readable paragraph.
-    const read = child => {
-      if (child.nodeType === 3) return child.data;
-      if (child.nodeType !== 1 || child.matches(textNoiseSelector)) return '';
-      if (nestedList && child !== node && child.matches('ul,ol,menu')) return '';
+    function* read(child) {
+      if (child.nodeType === 3) { yield child.data; return; }
+      if (child.nodeType !== 1) return;
+      yield ''; // Even empty/hidden syntax nodes must yield to the caller's budget.
+      if (child.matches(textNoiseSelector)) return;
+      if (nestedList && child !== node && child.matches('ul,ol,menu')) return;
       const style = node.ownerDocument.defaultView.getComputedStyle(child);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return '';
-      if (child.matches('br')) return '\n';
-      const text = [...child.childNodes].map(read).join('');
-      return /^(block|list-item|table-row|table-cell|flex|grid)$/.test(style.display) ? `\n${text}\n` : text;
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return;
+      if (child.matches('br')) { yield '\n'; return; }
+      const block = child !== node && /^(block|list-item|table-row|table-cell|flex|grid)$/.test(style.display);
+      if (block) yield '\n';
+      for (let at = child.firstChild; at; at = at.nextSibling) yield* read(at);
+      if (block) yield '\n';
+    }
+    const iterator = read(node);
+    return {
+      advance(budget = Infinity, limit = Infinity) {
+        const started = performance.now();
+        while (!done && size < limit) {
+          const next = iterator.next();
+          if (next.done) { done = true; break; }
+          const part = next.value.slice(0, Math.max(0, limit - size));
+          if (part) parts.push(part); size += part.length;
+          if (performance.now() - started >= budget) break;
+        }
+        if (done || size >= limit) text = cleanText(parts.join('') || node.getAttribute('aria-label') || '');
+        return { done, text, size };
+      }
     };
-    return cleanText(read(node) || node.getAttribute('aria-label') || '');
+  }
+
+  function readableText(node, cleanText, limit = Infinity) {
+    if (!node) return '';
+    if (!node.isConnected) return cleanText((node.textContent || '').slice(0, limit));
+    return createTextReader(node, cleanText).advance(Infinity, limit).text;
+  }
+
+  const semanticSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,td,th,caption,li,dt,dd,[role="cell"],[role="gridcell"]';
+  const customSelector = '[data-block-id],[data-slate-node="element"],[data-lexical-node="true"],[data-testid*="paragraph" i],[role="heading"],[role="paragraph"],[role="article"],[role="listitem"]';
+  const blockSelector = semanticSelector + ',' + customSelector;
+
+  // One traversal, with syntax spans and semantic block contents pruned. The
+  // caller may stop between candidates instead of synchronously scanning a page.
+  function* blockCandidates(root, noiseSelector) {
+    if (!root) return;
+    const directText = [...root.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
+    if ((root.matches?.(blockSelector) && !root.matches('li,dt,dd,blockquote,' + customSelector)) || directText && !root.querySelector(blockSelector)) { yield root; return; }
+    const selectedLists = new WeakSet();
+    let node = root;
+    while (node) {
+      let descend = true, candidate = false;
+      if (node.matches(noiseSelector) || node.matches(textNoiseSelector)) descend = false;
+      else if (node.matches(blockSelector)) {
+        const nested = node.matches('li,dt,dd,blockquote,' + customSelector)
+          && node.querySelector(semanticSelector + ',' + customSelector);
+        if (!nested || node.matches('li') && !node.querySelector('p,pre,blockquote')) { candidate = true; if (node.matches('li')) selectedLists.add(node); }
+        descend = Boolean(nested) || node.matches('li');
+      } else if (node.matches('div,section,span,[role="text"],[aria-label]') && !node.closest('pre') && !selectedLists.has(node.closest('li'))) {
+        const direct = [...node.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
+        if (direct && !node.querySelector(blockSelector) && !isCodeChrome(node, root)) { candidate = true; descend = false; }
+        else if (!node.firstElementChild && node.getAttribute('aria-label')?.length > 1) candidate = true;
+      }
+      // A caller may yield between batches while React replaces this turn.
+      const successors = [];
+      if (descend && node.firstElementChild) successors.push(node.firstElementChild);
+      for (let parent = node; parent && parent !== root; parent = parent.parentElement) {
+        if (parent.nextElementSibling) successors.push(parent.nextElementSibling);
+      }
+      if (candidate) yield node;
+      node = successors.find(node => node.isConnected && root.contains(node)) || null;
+    }
   }
 
   function scopeFor(node) {
@@ -151,6 +209,20 @@
     return { scopes, full };
   }
 
+  function nextPart(text, offset, code, chunksFor, openingChunksFor = null) {
+    let cursor = offset;
+    while (cursor < text.length) {
+      while (cursor < text.length && /\s/u.test(text[cursor])) cursor++;
+      if (cursor >= text.length) return null;
+      const window = text.slice(cursor, cursor + (code ? 2400 : 1201));
+      const part = code ? codePassages(window, chunksFor)[0] : { text: chunksFor(window, 1200)[0], offset: 0 };
+      if (!part?.text) { cursor += window.length; continue; }
+      const value = openingChunksFor ? openingChunksFor(part.text)[0] : part.text;
+      return { text: value, offset: cursor + (part.offset || 0) };
+    }
+    return null;
+  }
+
   function codePassages(text, chunksFor, limit = 1200) {
     const parts = [];
     let cursor = 0, prefix = null;
@@ -171,7 +243,17 @@
           else if (!previous && prefix === null) prefix = offset;
           continue;
         }
-        const from = prefix !== null && end - prefix <= limit ? prefix : offset;
+        if (prefix !== null && end - prefix > limit) {
+          const value = text.slice(prefix, end);
+          let cursor = prefix;
+          for (const part of chunksFor(value, limit)) {
+            cursor = text.indexOf(part, cursor);
+            parts.push({ text: part, offset: cursor }); cursor += part.length;
+          }
+          prefix = null;
+          continue;
+        }
+        const from = prefix !== null ? prefix : offset;
         parts.push({ text: text.slice(from, end), offset: from });
         prefix = null;
       }
@@ -179,7 +261,7 @@
     return parts;
   }
 
-  const api = { textNoiseSelector, visibleBlock, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, mutationScopes, codePassages };
+  const api = { textNoiseSelector, blockSelector, blockCandidates, visibleBlock, createTextReader, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, mutationScopes, nextPart, codePassages };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraPassages = api;
 })(globalThis);

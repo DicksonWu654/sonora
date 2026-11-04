@@ -33,6 +33,7 @@ async function install(page, savedSpeed = 1.25) {
     await page.evaluate(script(file));
     if (file === 'text.js') await page.evaluate(`(() => { window.splitCalls = 0; const split = BookText.chunksFor; BookText.chunksFor = (...args) => { splitCalls++; return split(...args); }; })()`);
   }
+  await page.evaluate('window.__sonoraOverlay.whenIndexed');
   await page.evaluate(`(() => {
     const stretch = SonoraTempo.stretch;
     SonoraTempo.stretch = (channels, sampleRate, rate) => { stretches.push(rate); return stretch(channels, sampleRate, rate); };
@@ -167,5 +168,34 @@ test('a short opening preserves its remainder and prefetches it before the first
   assert.equal(await page.evaluate('pending.size'), 2, 'only current and next renders may be pending');
   await page.evaluate(`panel.querySelector('.stop').click()`);
   assert.equal(await page.evaluate('pending.size'), 0);
+  assert.deepEqual(page.errors, []);
+});
+
+test('generic wrappers inside a list entry are read once while nested entries remain separate', async t => {
+  const page = await browser(t, '<main><ul><li><div>Parent entry.</div><ul><li><span>Child entry.</span></li></ul></li></ul></main>');
+  if (!page) return;
+  await install(page);
+  const texts = await page.evaluate(`[...document.querySelectorAll('.sonora-readable-block')].map(node => SonoraPassages.readableText(node, BookText.cleanText))`);
+  assert.deepEqual(texts, ['Parent entry.', 'Child entry.']);
+  assert.deepEqual(page.errors, []);
+});
+
+test('synthesis dispatch precedes native audio service initialization', async t => {
+  const page = await browser(t, '<main><p>Speak this sentence first.</p><p>Continue reading.</p></main>');
+  if (!page) return;
+  await install(page);
+  await page.evaluate(`(() => {
+    const Context = AudioContext;
+    window.audioCreatedAfterRender = null;
+    window.AudioContext = class extends Context {
+      constructor(...args) { super(...args); audioCreatedAfterRender = messages.some(item => item.type === 'sonora-render'); }
+    };
+    document.querySelector('p').click();
+  })()`);
+  assert.equal(await page.evaluate('audioCreatedAfterRender'), null);
+  await page.evaluate(`(() => { const first = messages.find(item => item.type === 'sonora-render'); renderReady({type: 'sonora-render-ready', requestId: first.requestId}); })()`);
+  assert.equal(await page.evaluate('audioCreatedAfterRender'), true);
+  assert.equal(await page.evaluate('audioStarts.length'), 0);
+  await page.evaluate(`panel.querySelector('.stop').click()`);
   assert.deepEqual(page.errors, []);
 });

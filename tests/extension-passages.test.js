@@ -134,3 +134,25 @@ test('retained identities have a bound on both entry count and text size', () =>
   const first = reconcile([], [large])[0];
   assert.notEqual(reconcile([], [large])[0].key, first.key, 'oversized text must not be held in the identity cache');
 });
+
+test('lazy passages cover a huge answer and code without losing opening or chunk seams', () => {
+  const { nextPart } = require('../extension/passages');
+  const { openingChunksFor } = require('../public/text');
+  for (const [text, code] of [
+    [Array.from({length: 50000}, (_, at) => 'word' + at).join(' ') + '. End.', false],
+    [Array.from({length: 20000}, (_, at) => 'call' + at + '();\n}').join('\n'), true],
+    ['{\n' + 'long😀name'.repeat(5000) + ';\n}\nnext();\n---', true]
+  ]) {
+    const parts = [];
+    let cursor = 0;
+    while (cursor < text.length) {
+      const part = nextPart(text, cursor, code, chunksFor, parts.length ? null : openingChunksFor);
+      if (!part) break;
+      assert.equal(text.slice(part.offset, part.offset + part.text.length), part.text);
+      assert(part.text.length <= 1200 && part.text.isWellFormed());
+      assert(part.offset >= cursor);
+      parts.push(part.text); cursor = part.offset + part.text.length;
+    }
+    assert.equal(parts.join('').replace(/\s/gu, ''), text.replace(/\s/gu, ''));
+  }
+});
