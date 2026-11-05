@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.9';
+  const OVERLAY_VERSION = '0.4.10';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -67,9 +67,81 @@
     const target = event?.target;
     return !target || target === document || target === window || source.root?.contains(target) || target.contains?.(source.root);
   }
-  let containmentFrame = null;
-  function setTurnContainment(enabled, remove = false) {
-    if (!visibilityStyle) return;
+  let containmentFrame = null, containedNode = null, containmentScan = null, containmentToken = 0;
+  let finishContainment;
+  const whenContained = new Promise(resolve => { finishContainment = resolve; });
+  function unsafeContainmentNode(node) {
+    return node.localName.includes('-') || Boolean(node.shadowRoot) || /^(fixed|sticky)$/.test(getComputedStyle(node).position);
+  }
+  function cancelContainmentScan() {
+    if (containmentScan?.timer != null) clearTimeout(containmentScan.timer);
+    containmentScan = null;
+  }
+  function safeContainmentChanges(roots) {
+    const started = performance.now();
+    let visited = 0;
+    for (const root of roots) {
+      if (!root.isConnected) continue;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      for (let node = root; node; node = walker.nextNode()) {
+        if (++visited > 256 || (visited > 16 && performance.now() - started > 3) || unsafeContainmentNode(node)) return false;
+      }
+    }
+    return true;
+  }
+  function checkContainmentChanges(records) {
+    const target = containedNode || containmentScan?.target;
+    if (!target) return;
+    if (!target.isConnected) { setTurnContainment(false); return; }
+    const roots = new Set();
+    for (const record of records) {
+      const changed = record.type === 'attributes' ? [record.target] : record.addedNodes || [];
+      for (const node of changed) if (node.nodeType === Node.ELEMENT_NODE && (target.contains(node) || (record.type === 'attributes' && node.contains(target)))) {
+        roots.add(node);
+        if (roots.size > 64) { setTurnContainment(false); return; }
+      }
+    }
+    if (containmentScan) {
+      roots.forEach(node => containmentScan.dirty.add(node));
+      if (containmentScan.dirty.size > 64) setTurnContainment(false);
+    } else if (!safeContainmentChanges(roots)) setTurnContainment(false);
+  }
+  function findContainmentTarget() {
+    cancelContainmentScan();
+    const turns = source.root?.querySelectorAll('[data-testid^="conversation-turn-"]');
+    let target = turns?.[0]?.parentElement;
+    while (target && !target.contains(turns[turns.length - 1])) target = target.parentElement;
+    if (!target || !source.root.contains(target)) { setTurnContainment(false); return; }
+    // Prove the existing boundary safe without blocking opening or scrolling.
+    // Include turn contents: a fixed menu inside a turn also needs its viewport.
+    const scan = containmentScan = { target, node: target, walker: document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT), dirty: new Set(), timer: null };
+    function batch() {
+      scan.timer = null;
+      if (containmentScan !== scan) return;
+      if (state.closed || !target.isConnected || !target.contains(scan.node)) { setTurnContainment(false); return; }
+      if (performance.now() - lastPositionChange < 150) { scan.timer = setTimeout(batch, 150); return; }
+      const started = performance.now();
+      do {
+        if (unsafeContainmentNode(scan.node)) { setTurnContainment(false); return; }
+        scan.node = scan.walker.nextNode();
+      } while (scan.node && performance.now() - started < 3);
+      if (scan.node) { scan.timer = setTimeout(batch, 16); return; }
+      containmentScan = null;
+      if (!safeContainmentChanges(scan.dirty)) { setTurnContainment(false); return; }
+      setTurnContainment(true, false, target);
+    }
+    scan.timer = setTimeout(batch, 0);
+  }
+  function setTurnContainment(enabled, remove = false, target = null) {
+    if (!visibilityStyle) { finishContainment(false); return; }
+    if (CHATGPT_CONTAINMENT === 'coarse' && enabled && !remove && !target) { findContainmentTarget(); return; }
+    if (!enabled || remove) cancelContainmentScan();
+    if (CHATGPT_CONTAINMENT === 'coarse' && !enabled && !containedNode) {
+      visibilityStyle.disabled = true;
+      if (remove) visibilityStyle.remove();
+      finishContainment(false);
+      return;
+    }
     if (containmentFrame !== null) cancelAnimationFrame(containmentFrame);
     // A single viewport anchor preserves position when estimated off-screen
     // heights replace actual heights (and when the stylesheet is removed).
@@ -80,22 +152,30 @@
     }
     const top = anchor?.getBoundingClientRect().top;
     const scrollport = scrollportsFor(anchor)[0];
+    if (CHATGPT_CONTAINMENT === 'coarse') {
+      containedNode?.removeAttribute('data-sonora-containment');
+      containedNode = enabled && !remove ? target : null;
+      if (containedNode) {
+        const token = ++containmentToken;
+        containedNode.setAttribute('data-sonora-containment', token);
+        visibilityStyle.textContent = `[data-sonora-containment="${token}"] { content-visibility: auto; contain-intrinsic-size: auto ${containedNode.scrollHeight}px; }`;
+      }
+    }
     if (remove) visibilityStyle.remove();
     else {
       visibilityStyle.disabled = !enabled;
       if (!visibilityStyle.isConnected) {
-        // Use one container measurement, without walking or marking each turn.
-        // Intrinsic sizes describe the content box, excluding padding/borders.
-        const firstTurn = source.root?.querySelector('[data-testid^="conversation-turn-"]');
-        const container = firstTurn?.parentElement;
-        const average = container ? container.scrollHeight / Math.max(1, container.childElementCount) : 600;
-        const style = firstTurn && getComputedStyle(firstTurn);
-        const inset = style ? ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
-          .reduce((sum, property) => sum + parseFloat(style[property]), 0) : 0;
-        const estimate = Math.round(Math.min(1200, Math.max(32, average - inset)));
-        const selector = CHATGPT_CONTAINMENT === 'coarse' ? '[role="region"][aria-label="Conversation"]' : '[data-testid^="conversation-turn-"]';
-        const intrinsic = CHATGPT_CONTAINMENT === 'coarse' ? source.root.scrollHeight : estimate;
-        visibilityStyle.textContent = `${selector} { content-visibility: auto; contain-intrinsic-size: auto ${intrinsic}px; }`;
+        if (CHATGPT_CONTAINMENT !== 'coarse') {
+          // Intrinsic sizes describe the content box, excluding padding/borders.
+          const firstTurn = source.root?.querySelector('[data-testid^="conversation-turn-"]');
+          const container = firstTurn?.parentElement;
+          const average = container ? container.scrollHeight / Math.max(1, container.childElementCount) : 600;
+          const style = firstTurn && getComputedStyle(firstTurn);
+          const inset = style ? ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+            .reduce((sum, property) => sum + parseFloat(style[property]), 0) : 0;
+          const estimate = Math.round(Math.min(1200, Math.max(32, average - inset)));
+          visibilityStyle.textContent = `[data-testid^="conversation-turn-"] { content-visibility: auto; contain-intrinsic-size: auto ${estimate}px; }`;
+        }
         (document.head || document.documentElement).append(visibilityStyle);
       }
     }
@@ -107,6 +187,7 @@
     };
     restore();
     containmentFrame = requestAnimationFrame(restore);
+    finishContainment(enabled && !remove);
   }
   const visibilityListener = event => {
     if (event.skipped) {
@@ -472,8 +553,9 @@
     panelWriteFrame = null;
     const tick = () => {
       wordFrame = null;
-      if (state.closed || !state.playing) return;
+      if (state.closed) return;
       flushPanelWrites();
+      if (!state.playing) return;
       paintCurrentWord();
       wordFrame = requestAnimationFrame(tick);
     };
@@ -1155,6 +1237,7 @@
       source.noiseSelector = nextSource.noiseSelector;
       els.title.textContent = source.title || document.title || 'Untitled page';
       observeSource();
+      if (CHATGPT_CONTAINMENT === 'coarse') setTurnContainment(true);
     }
     if (!isGoogleDocsPage()) { discoverPage(); return; }
     ensureOrderedEntries();
@@ -1165,7 +1248,12 @@
   function scheduleBlockRefresh(records) {
     if (sourceUrl !== location.href) pageType = pageTypeFor(location.href);
     const mutations = records && typeof records[Symbol.iterator] === 'function';
-    if (mutations) invalidateGeometry(records);
+    if (mutations) {
+      checkContainmentChanges(records);
+      invalidateGeometry(records);
+      // Class changes are observed only to keep the containment boundary safe.
+      records = [...records].filter(record => record.type !== 'attributes' || record.attributeName !== 'class');
+    }
     if (mutations && isChatGPTPage()) {
       records = window.SonoraPassages.contentMutations(records, root, source.root);
       if (!records.length && sourceUrl === location.href) return;
@@ -1359,7 +1447,7 @@
   };
   document.addEventListener('pointerdown', docsPointerDownListener, true);
   const docsPointerListener = event => {
-    if (!indexingDone) lastPositionChange = performance.now();
+    if (!indexingDone || containmentScan) lastPositionChange = performance.now();
     if (!isGoogleDocsPage()) {
       if (!codeEntryCount) return;
       const target = event.target instanceof Element ? event.target : null;
@@ -1379,7 +1467,7 @@
   document.addEventListener('pointermove', docsPointerListener, { capture: true, passive: true });
   const wheelActivityListener = event => {
     if (!relevantScroll(event)) return;
-    if (!indexingDone || state.queue.length || codeHoverPoint?.block || codeMarks.size) wordPositionListener();
+    if (!indexingDone || containmentScan || state.queue.length || codeHoverPoint?.block || codeMarks.size) wordPositionListener();
     if (state.queue.length) followReading = false;
   };
   document.addEventListener('wheel', wheelActivityListener, { capture: true, passive: true });
@@ -1431,7 +1519,7 @@
     pageObserver.disconnect();
     const rootNode = source.root || document.body || document.documentElement;
     if (!rootNode) return false;
-    pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-hidden', 'style'] });
+    pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-hidden', 'style', ...(visibilityStyle && CHATGPT_CONTAINMENT === 'coarse' ? ['class'] : [])] });
     // Watch only direct child replacement on the ancestor chain. Sidebar and
     // composer traffic outside the source needs no subtree observer.
     for (let ancestor = rootNode.parentElement; ancestor; ancestor = ancestor.parentElement) pageObserver.observe(ancestor, { childList: true });
@@ -1637,6 +1725,7 @@
   window.__sonoraOverlay = {
     version: OVERLAY_VERSION,
     whenIndexed,
+    whenContained,
     toggle: togglePanel,
     dispose: () => els.close.click()
   };

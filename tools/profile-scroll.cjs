@@ -1,5 +1,5 @@
 // Interleaved runner adapted from the independent /tmp/measure-runner.cjs.
-// node tools/profile-scroll.cjs <output-label>; SCROLL_REPS >= 5, optional SCROLL_CONDITIONS.
+// node tools/profile-scroll.cjs <output-label>; defaults to five interleaved repetitions.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -20,8 +20,11 @@ fs.mkdirSync(out, { recursive: true });
 const builds = {};
 const sequence = (process.env.SCROLL_CONDITIONS || 'A,C048,Cnone,Cturn,Ccoarse,D048,Dnone,Dturn,Dcoarse').split(',');
 const repetitions = Number(process.env.SCROLL_REPS || 5);
-if (!Number.isInteger(repetitions) || repetitions < 5)
-  throw new Error('Comparisons require at least five interleaved repetitions.');
+const quickCheck = process.env.SCROLL_QUICK_CHECK === '1';
+const minimumRepetitions = quickCheck ? 3 : 5;
+const baselineName = process.env.SCROLL_BASELINE_NAME || '048';
+if (!Number.isInteger(repetitions) || repetitions < minimumRepetitions)
+  throw new Error(`Comparisons require at least ${minimumRepetitions} interleaved repetitions.`);
 let activeContext = null,
   interrupted = false;
 process.on('SIGINT', () => {
@@ -50,10 +53,10 @@ function buildHash(build) {
 function snapshotBuilds() {
   const destination = path.join(out, 'builds');
   fs.mkdirSync(destination, { recursive: true });
-  builds['048'] = path.join(destination, '048');
-  if (!fs.existsSync(builds['048'])) {
-    fs.mkdirSync(builds['048']);
-    execFileSync('tar', ['-x', '-C', builds['048']], {
+  builds[baselineName] = path.join(destination, baselineName);
+  if (!fs.existsSync(builds[baselineName])) {
+    fs.mkdirSync(builds[baselineName]);
+    execFileSync('tar', ['-x', '-C', builds[baselineName]], {
       input: execFileSync('git', ['archive', process.env.SCROLL_BASELINE || '18cc151', 'extension', 'package.json'], {
         cwd: repo
       })
@@ -357,6 +360,7 @@ async function runOne(condition, repetition, sequenceIndex) {
       await bcdp.send('Extensions.triggerAction', { id, targetId: tab.targetId });
       await page.waitForSelector('#sonora-overlay-root', { state: 'attached' });
       await isolated(s, 'window.__sonoraOverlay.whenIndexed.then(()=>true)');
+      await isolated(s, 'Promise.resolve(window.__sonoraOverlay.whenContained).then(()=>true)');
       await cdp.send('Debugger.disable');
       if (condition[0] === 'D') {
         await page.locator('#text-0').click({ position: { x: 15, y: 12 } });
@@ -457,6 +461,7 @@ async function runOne(condition, repetition, sequenceIndex) {
         height: document.querySelector('#chat-scroll').scrollHeight,
         siteStats,
         cv: window.__cv,
+        containmentEnabled: Boolean(document.querySelector('#sonora-chatgpt-visibility')?.sheet && !document.querySelector('#sonora-chatgpt-visibility').disabled),
         now: performance.now()
       };
     });
@@ -501,7 +506,7 @@ async function runOne(condition, repetition, sequenceIndex) {
       costs,
       wheelDelta,
       initial,
-      end: { y: measurement.endY, height: measurement.height, siteStats: measurement.siteStats, cv: measurement.cv },
+      end: { y: measurement.endY, height: measurement.height, siteStats: measurement.siteStats, cv: measurement.cv, containmentEnabled: measurement.containmentEnabled },
       cpuFile,
       traceFile,
       errors
@@ -534,6 +539,8 @@ async function runOne(condition, repetition, sequenceIndex) {
       fixture: { turns: 2200, bytes: Buffer.byteLength(fixture), sha256: fixtureHash, scrollport: '#chat-scroll' },
       sequence,
       repetitions,
+      quickCheck,
+      baselineName,
       viewport: { width: 1440, height: 1000 },
       chromiumPath: chromiumPath(),
       buildHashes: hashes,

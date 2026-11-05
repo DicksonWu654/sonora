@@ -39,9 +39,11 @@ function cpuSelfTime(rows) {
     .sort((a, b) => b.selfMs - a.selfMs);
 }
 const conditions = {};
+const minimumRepetitions = input.metadata.quickCheck ? 3 : 5;
+const baselineName = input.metadata.baselineName || '048';
 for (const condition of input.metadata.sequence) {
   const rows = input.runs.filter((row) => row.condition === condition);
-  if (rows.length < 5) throw Error('Need five repetitions for ' + condition);
+  if (rows.length < minimumRepetitions) throw Error(`Need ${minimumRepetitions} repetitions for ` + condition);
   if (
     rows.some(
       (row) =>
@@ -79,13 +81,13 @@ for (const condition of input.metadata.sequence) {
     cpu: { top: cpu.slice(0, 20), extension: cpu.filter((row) => row.file.startsWith('extension/')).slice(0, 20) }
   };
 }
-const a = conditions.A.metrics;
+const referenceFor = prefix => (conditions.A || conditions[prefix + baselineName]).metrics;
 const variants = ['none', 'turn', 'coarse']
   .filter(mode => conditions['C' + mode] && conditions['D' + mode])
   .map((mode) => {
     const ratios = ['C', 'D'].flatMap((prefix) =>
       ['droppedFrames', 'longTaskTotalMs'].map(
-        (metric) => conditions[prefix + mode].metrics[metric].median / Math.max(1, a[metric].median)
+        (metric) => conditions[prefix + mode].metrics[metric].median / Math.max(1, referenceFor(prefix)[metric].median)
       )
     );
     return {
@@ -96,7 +98,7 @@ const variants = ['none', 'turn', 'coarse']
   })
   .sort((left, right) => left.worstRatio - right.worstRatio || left.meanRatio - right.meanRatio);
 const selected = process.env.SCROLL_SELECTED || variants[0].mode;
-const table = ['A', 'C048', 'D048', 'C' + selected, 'D' + selected].map((condition) => ({
+const table = ['A', 'C' + baselineName, 'D' + baselineName, 'C' + selected, 'D' + selected].filter(condition => conditions[condition]).map((condition) => ({
   condition,
   frameP95Ms: conditions[condition].metrics.frameP95Ms,
   droppedFrames: conditions[condition].metrics.droppedFrames,
@@ -107,11 +109,14 @@ const table = ['A', 'C048', 'D048', 'C' + selected, 'D' + selected].map((conditi
 const target = Object.fromEntries(
   ['C', 'D'].map((prefix) => {
     const metrics = conditions[prefix + selected].metrics;
+    const reference = referenceFor(prefix);
     return [
       prefix,
       {
-        droppedAtOrBelowA: metrics.droppedFrames.median <= a.droppedFrames.median,
-        longTaskMsAtOrBelowA: metrics.longTaskTotalMs.median <= a.longTaskTotalMs.median
+        reference: conditions.A ? 'A' : prefix + baselineName,
+        frameP95AtOrBelowReference: metrics.frameP95Ms.median <= reference.frameP95Ms.median,
+        droppedAtOrBelowReference: metrics.droppedFrames.median <= reference.droppedFrames.median,
+        longTaskMsAtOrBelowReference: metrics.longTaskTotalMs.median <= reference.longTaskTotalMs.median
       }
     ];
   })
@@ -121,7 +126,7 @@ const summary = {
   study: label,
   selection: {
     selected,
-    rule: 'Minimize the worst ratio to A across idle/reading median dropped frames and long-task milliseconds; mean ratio breaks ties.',
+    rule: `Minimize the worst ratio to ${conditions.A ? 'A' : baselineName} across idle/reading median dropped frames and long-task milliseconds; mean ratio breaks ties.`,
     variants
   },
   target,
