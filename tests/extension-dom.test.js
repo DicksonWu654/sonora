@@ -45,7 +45,8 @@ test('500-turn ChatGPT DOM bounds streaming discovery, code hit testing, highlig
   if (!page) return;
   await install(page);
   assert.equal(await page.evaluate('document.querySelectorAll("article").length'), 500);
-  assert.equal(await page.evaluate('document.querySelectorAll("pre.sonora-code-block").length'), 100);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^600 clickable blocks/);
+  assert.equal(await page.evaluate('document.querySelectorAll("pre").length'), 100);
   assert.equal(await page.evaluate('panel.querySelector(".speed").value'), '1.3');
   assert.equal(await page.evaluate('saved.sonoraSpeed'), 1.3);
 
@@ -53,7 +54,7 @@ test('500-turn ChatGPT DOM bounds streaming discovery, code hit testing, highlig
     window.splitCalls = 0;
     window.cost = { turns: [], queries: 0, marks: 0, ranges: 0, comparisons: 0 };
     const visible = SonoraPassages.visibleBlock;
-    SonoraPassages.visibleBlock = node => { cost.turns.push(node.closest('article')?.dataset.testid); return visible(node); };
+    SonoraPassages.visibleBlock = (node, ...args) => { cost.turns.push(node.closest('article')?.dataset.testid); return visible(node, ...args); };
     const query = Element.prototype.querySelectorAll;
     Element.prototype.querySelectorAll = function (selector) { cost.queries++; return query.call(this, selector); };
     const add = DOMTokenList.prototype.add;

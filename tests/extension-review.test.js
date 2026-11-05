@@ -36,7 +36,7 @@ test('same-ID turn replacement remains clickable for prose and code', async t =>
   const page = await browser(t, longChatHtml(2));
   if (!page) return;
   await install(page);
-  assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 3);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^3 clickable blocks/);
   await page.evaluate(`(() => {
     const previous = document.querySelector('article');
     const replacement = previous.cloneNode(true);
@@ -46,7 +46,7 @@ test('same-ID turn replacement remains clickable for prose and code', async t =>
     previous.replaceWith(replacement);
   })()`);
   await delay(220);
-  assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 3);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^3 clickable blocks/);
   await page.evaluate(`document.querySelector('article p').click()`);
   assert.equal(await page.evaluate(lastRender), 'Replacement prose.');
   await page.evaluate(`document.querySelector('pre').click()`);

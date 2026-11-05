@@ -2,13 +2,17 @@
   const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden';
   const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
-  function visibleBlock(node) {
+  function visibleBlock(node, contained = false) {
     if (!node?.isConnected || node.closest(textNoiseSelector)) return false;
     const style = node.ownerDocument.defaultView.getComputedStyle(node);
     if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
     for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
-      if (node.ownerDocument.defaultView.getComputedStyle(ancestor).opacity === '0') return false;
+      const parentStyle = node.ownerDocument.defaultView.getComputedStyle(ancestor);
+      if (parentStyle.opacity === '0' || parentStyle.display === 'none') return false;
     }
+    // Geometry queries materialize skipped content-visibility subtrees. ChatGPT
+    // turns retain their readable DOM even while the browser skips rendering.
+    if (contained) return style.display !== 'none';
     return [...node.getClientRects()].some(rect => rect.width > 1 && rect.height > 1);
   }
 
@@ -206,6 +210,45 @@
     return `${parsed.origin}${parsed.pathname}${chat ? '' : parsed.search}`;
   }
 
+  // Filter before invalidating extraction/range caches. ChatGPT changes its UI
+  // on every hover; those records do not alter the narration source.
+  const chromeSelector = 'script,style,noscript,template,button,input,textarea,select,nav,aside,header,footer,form,time,[role="button"],[role="toolbar"],[role="tooltip"],[role="navigation"],[role="status"],[role="menu"],.sr-only,.visually-hidden';
+  function contentMutations(records, overlayRoot, readableRoot) {
+    const announcement = node => node.hasAttribute?.('aria-live')
+      && !node.matches(blockSelector + ',[data-message-id],[data-testid^="conversation-turn-"],.markdown,.prose')
+      && !node.querySelector(blockSelector + ',[data-message-id],[data-testid^="conversation-turn-"],.markdown,.prose');
+    const meaningful = node => {
+      const pending = [node];
+      let visited = 0;
+      while (pending.length) {
+        const child = pending.pop();
+        if (child === overlayRoot) continue;
+        if (child.nodeType === 3) { if (child === node ? child.data.length : /\S/u.test(child.data)) return true; continue; }
+        if (child.nodeType !== 1 || child.matches(chromeSelector + ',[hidden],[inert],[aria-hidden="true"]') || announcement(child)) continue;
+        // Prune UI wrappers without serializing large message/code subtrees.
+        if (child.matches(blockSelector + ',[data-message-id],[data-testid^="conversation-turn-"]') || child.getAttribute('aria-label')) return true;
+        if (++visited > 64) return true;
+        for (let at = child.lastChild; at; at = at.previousSibling) pending.push(at);
+      }
+      return false;
+    };
+    return [...records].filter(record => {
+      const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
+      if (!target || overlayRoot?.contains(target)) return false;
+      if (readableRoot?.isConnected && !readableRoot.contains(target)) return false;
+      if (!readableRoot?.isConnected) return true; // The readable root was replaced.
+      if (target.closest?.(chromeSelector)) return false;
+      const live = target.closest?.('[aria-live]');
+      if (live && announcement(live)) return false;
+      // Code headers and copy controls are siblings of the actual code text.
+      const pre = target.closest?.('pre'), code = pre?.querySelector('code');
+      if (code && target !== pre && !code.contains(target) && !target.contains(code)) return false;
+      if (record.type === 'attributes') return true; // Including newly hidden prose.
+      if (target.closest?.('[hidden],[inert],[aria-hidden="true"]')) return false;
+      return record.type !== 'childList' || [...record.addedNodes, ...record.removedNodes].some(meaningful);
+    });
+  }
+
   function mutationScopes(records, overlayRoot = null, readableRoot = null) {
     const scopes = new Set();
     let full = false;
@@ -287,7 +330,7 @@
     return parts;
   }
 
-  const api = { textNoiseSelector, blockSelector, blockCandidates, visibleBlock, createTextReader, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, mutationScopes, nextPart, codePassages };
+  const api = { textNoiseSelector, blockSelector, blockCandidates, visibleBlock, createTextReader, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, contentMutations, mutationScopes, nextPart, codePassages };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraPassages = api;
 })(globalThis);

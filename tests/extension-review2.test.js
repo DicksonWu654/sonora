@@ -250,6 +250,6 @@ test('initial discovery waits for the controls paint before spending its page bu
   assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 0);
   await page.evaluate(`for (let frame = 0; frame < 2; frame++) pendingFrames.splice(0).forEach(callback => callback(performance.now()))`);
   await page.evaluate('window.__sonoraOverlay.whenIndexed');
-  assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 120);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^120 clickable blocks/);
   assert.deepEqual(page.errors, []);
 });

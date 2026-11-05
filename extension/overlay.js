@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.7';
+  const OVERLAY_VERSION = '0.4.8';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -33,8 +33,72 @@
   let domRevision = 0;
   const extractionCache = new WeakMap();
   const dirtyTextNodes = new WeakSet();
+  const insertedRoots = new WeakMap();
+  let insertionEpoch = 0;
+  function isTextDirty(node) {
+    if (dirtyTextNodes.has(node)) return true;
+    const epoch = extractionCache.get(node)?.epoch || 0;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      if ((insertedRoots.get(parent) || 0) > epoch) return true;
+      if (parent === source.root) break;
+    }
+    return false;
+  }
   const textVersions = new WeakMap();
   const source = findReadableSource();
+  const visibilityStyle = isChatGPTPage() ? document.createElement('style') : null;
+  const skippedTurns = new WeakSet();
+  if (visibilityStyle) {
+    visibilityStyle.id = 'sonora-chatgpt-visibility';
+  }
+  let containmentFrame = null;
+  function setTurnContainment(enabled, remove = false) {
+    if (!visibilityStyle) return;
+    if (containmentFrame !== null) cancelAnimationFrame(containmentFrame);
+    // A single viewport anchor preserves position when estimated off-screen
+    // heights replace actual heights (and when the stylesheet is removed).
+    let anchor = null;
+    for (const fraction of [.5, .25, .75]) {
+      anchor = document.elementFromPoint(innerWidth / 2, innerHeight * fraction)?.closest('[data-testid^="conversation-turn-"]');
+      if (anchor) break;
+    }
+    const top = anchor?.getBoundingClientRect().top;
+    if (remove) visibilityStyle.remove();
+    else {
+      visibilityStyle.disabled = !enabled;
+      if (!visibilityStyle.isConnected) {
+        // Use one container measurement, without walking or marking each turn.
+        // Intrinsic sizes describe the content box, excluding padding/borders.
+        const firstTurn = source.root?.querySelector('[data-testid^="conversation-turn-"]');
+        const container = firstTurn?.parentElement;
+        const average = container ? container.scrollHeight / Math.max(1, container.childElementCount) : 600;
+        const style = firstTurn && getComputedStyle(firstTurn);
+        const inset = style ? ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+          .reduce((sum, property) => sum + parseFloat(style[property]), 0) : 0;
+        const estimate = Math.round(Math.min(1200, Math.max(32, average - inset)));
+        visibilityStyle.textContent = `[data-testid^="conversation-turn-"] { content-visibility: auto; contain-intrinsic-size: auto ${estimate}px; }`;
+        (document.head || document.documentElement).append(visibilityStyle);
+      }
+    }
+    const restore = () => {
+      containmentFrame = null;
+      if (!anchor?.isConnected) return;
+      const delta = anchor.getBoundingClientRect().top - top;
+      if (Math.abs(delta) > 1) scrollBy(0, delta);
+    };
+    restore();
+    containmentFrame = requestAnimationFrame(restore);
+  }
+  const visibilityListener = event => {
+    if (event.skipped) {
+      skippedTurns.add(event.target);
+      if (event.target.contains(currentEntry()?.node)) {
+        wordTracker.suspend();
+        markCodePart(null, null, 'sonora-current-code');
+      }
+    } else skippedTurns.delete(event.target);
+  };
+  if (visibilityStyle) document.addEventListener('contentvisibilityautostatechange', visibilityListener, true);
   let pageText = '';
   let blockEntries = [];
   const root = document.createElement('div');
@@ -42,10 +106,10 @@
   const shadow = root.attachShadow({ mode: 'closed' });
   const panelMarkup = `
     <style>
-      :host { all: initial; position: fixed; inset: 0; z-index: 2147483647; contain: strict; pointer-events: none; }
+      :host { all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; contain: style; overflow: visible; pointer-events: none; }
       * { box-sizing: border-box; }
       .panel, button, select { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; color: #eff2ec; background: #121815f7; border: 1px solid #354239; border-radius: 12px; box-shadow: 0 18px 70px #000b, 0 2px 12px #0008; backdrop-filter: blur(18px); }
+      .panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; color: #eff2ec; background: #121815; border: 1px solid #354239; border-radius: 12px; box-shadow: 0 18px 70px #000b, 0 2px 12px #0008; }
       .panel.is-hidden { display: none; }
       .word-mark { position: fixed; z-index: 2147483646; pointer-events: none; border-radius: 2px; background: rgba(239, 201, 135, .65); box-shadow: inset 0 -2px #b27635; }
       .top { display: flex; align-items: center; gap: 10px; padding: 15px 16px 13px; border-bottom: 1px solid #2d3930; }
@@ -83,7 +147,7 @@
       .stop { width: 65px; border: 1px solid #354239; background: transparent; color: #aeb8ac; }
       .stop:hover { border-color: #d8b28b; color: #eff2ec; }
       .track { height: 3px; margin: 12px 0 0; overflow: hidden; border-radius: 2px; background: #354239; }
-      .track i { display: block; width: 0; height: 100%; background: #d8b28b; transition: width .15s; }
+      .track i { display: block; width: 100%; height: 100%; background: #d8b28b; transform: scaleX(0); transform-origin: left; transition: transform .15s; }
       .hint { margin: 9px 0 0; color: #718076; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
       @keyframes sonar-blink { 50% { opacity: .35; } }
       @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
@@ -93,7 +157,7 @@
       <section class="heading"><p class="eyebrow">CLICK PAGE TEXT TO READ</p><h2></h2><p class="meta"></p></section>
       <div class="status"><i class="dot"></i><span></span></div>
       <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label><span class="speed-caption">Speed <output class="speed-value" for="sonora-speed">1×</output></span><input id="sonora-speed" class="speed" aria-label="Speed" type="range" min="1" max="3" step="0.1" value="1"></label></section>
-      <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any highlighted text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
+      <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
       <footer class="bottom"><div class="transport"><button class="stop" type="button">Stop</button><button class="play" type="button"><span class="play-icon">▶</span> <span class="play-label">Play from top</span></button></div><div class="track" aria-hidden="true"><i></i></div><p class="hint">Your page stays in place while Sonora reads.</p></footer>
       <audio preload="auto"></audio>
     </aside>`;
@@ -150,7 +214,7 @@
     closed: false,
     status: 'Checking the local voice…'
   };
-  let refreshTimer = null;
+  let refreshTimer = null, refreshIdle = null;
   const dirtyScopes = new Map();
   let fullRefreshPending = false;
   let sourceUrl = location.href;
@@ -168,6 +232,8 @@
   let codeHoverPoint = null;
   let codeHoverFrame = null;
   let codeHoverTimer = null, codeScrollTimer = null, codeScrolling = false;
+  let lastPositionChange = -Infinity, positionFrame = null;
+  let followReading = true, autoScrollUntil = -Infinity;
   let clickRevision = 0;
   const priorityReaders = new Map();
   els.audio.preservesPitch = true;
@@ -288,9 +354,9 @@
       markCodePart(null, null, 'sonora-hover-code');
       return;
     }
-    if (current?.kind === 'code' && item && !codeMarks.has('sonora-current-code')) markCodePart(current, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
+    if (current?.kind === 'code' && !skippedTurns.has(current.node.closest('[data-testid^="conversation-turn-"]')) && item && !codeMarks.has('sonora-current-code')) markCodePart(current, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
     const point = codeHoverPoint;
-    const block = point && (point.block === undefined ? document.elementFromPoint(point.x, point.y)?.closest('.sonora-code-block') : point.block);
+    const block = point && (point.block === undefined ? document.elementFromPoint(point.x, point.y)?.closest('pre') : point.block);
     const entry = block && entriesByNode.get(block);
     markCodePart(entry, entry && codePartAt(entry, point.x, point.y), 'sonora-hover-code');
   }
@@ -312,6 +378,7 @@
     return item && (item.blockKey ? entriesByKey.get(item.blockKey) : blockEntries[item.blockIndex]);
   }
   function paintCurrentWord() {
+    if (codeScrolling || skippedTurns.has(currentEntry()?.node.closest('[data-testid^="conversation-turn-"]'))) return;
     const position = state.webAudioBuffer ? webAudioPosition() : els.audio.currentTime;
     wordTracker.update(currentEntry(), position, isGoogleDocsPage() ? googleDocsSurface(source.root) : null);
   }
@@ -321,6 +388,7 @@
   }
   function startWordFrames() {
     stopWordFrames();
+    if (codeScrolling) return;
     const tick = () => {
       wordFrame = null;
       if (state.closed || !state.playing) return;
@@ -330,12 +398,34 @@
     wordFrame = requestAnimationFrame(tick);
   }
   function resetWords() { stopWordFrames(); wordTracker.reset(); }
+  function revealPassage(entry, item) {
+    if (!visibilityStyle || visibilityStyle.disabled || !entry?.node.isConnected || !followReading) return;
+    const turn = entry.node.closest('[data-testid^="conversation-turn-"]');
+    if (!turn) return;
+    autoScrollUntil = performance.now() + 300;
+    if (skippedTurns.has(turn)) entry.node.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const range = codeRange(entry, item.blockOffset, 1);
+    if (!range) return;
+    let rect = range.getClientRects()[0];
+    if (!rect) return;
+    for (let node = range.startContainer.parentElement; node; node = node.parentElement) {
+      if (/auto|scroll/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight) {
+        const bounds = node.getBoundingClientRect();
+        if (rect.top < bounds.top || rect.bottom > bounds.bottom) {
+          node.scrollBy(0, rect.top - bounds.top - node.clientHeight / 3);
+          rect = range.getClientRects()[0];
+        }
+      }
+      if (node === source.root) break;
+    }
+    if (rect && (rect.top < 60 || rect.bottom > innerHeight - 80)) scrollBy(0, rect.top - innerHeight / 3);
+  }
   function markCurrentBlock(blockIndex, blockKey) {
     clearCurrentBlock();
     const entry = blockKey ? entriesByKey.get(blockKey) : blockEntries[blockIndex];
-    if (entry) (entry.nodes || [entry.node]).forEach(node => { node.classList.add(currentClass); markedNodes.add(node); });
+    if (entry && !(isChatGPTPage() && entry.kind === 'code')) (entry.nodes || [entry.node]).forEach(node => { node.classList.add(currentClass); markedNodes.add(node); });
     const item = state.queue[state.index];
-    if (entry?.kind === 'code' && item) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
+    if (entry?.kind === 'code' && item && !codeScrolling && !skippedTurns.has(entry.node.closest('[data-testid^="conversation-turn-"]'))) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
   }
   function updateTransport() {
     els.playIcon.textContent = state.playing ? 'Ⅱ' : '▶';
@@ -371,9 +461,10 @@
     return Math.min(state.webAudioBuffer.duration, state.webAudioOffset + (state.audioContext.currentTime - state.webAudioStartedAt) * rate);
   }
   function updateProgress(position = state.webAudioOffset) {
+    if (codeScrolling) return;
     const duration = state.webAudioBuffer?.duration || 0;
     const part = duration ? position / duration : 0;
-    els.track.style.width = `${Math.min(100, ((state.index + part) / Math.max(1, state.queue.length)) * 100)}%`;
+    els.track.style.transform = `scaleX(${Math.min(1, (state.index + part) / Math.max(1, state.queue.length))})`;
   }
   function pauseWebAudio() {
     state.webAudioRun++;
@@ -460,7 +551,7 @@
       return false;
     }
     clearWebAudioTimer();
-    state.webAudioTimer = setInterval(() => updateProgress(webAudioPosition()), 50);
+    state.webAudioTimer = setInterval(() => updateProgress(webAudioPosition()), 250);
     return true;
   }
   function pausePlayback() {
@@ -610,9 +701,10 @@
     els.audio.removeAttribute('src');
     els.audio.load();
     trimRendered(index);
+    revealPassage(currentEntry(), item);
     markCurrentBlock(item.blockIndex, item.blockKey);
     updateTransport();
-    els.track.style.width = '0%';
+    if (!codeScrolling) els.track.style.transform = 'scaleX(0)';
     setStatus(`Rendering passage ${passageLabel(index)}…`, 'busy');
     try {
       const result = await render(index);
@@ -662,6 +754,7 @@
     }
   }
   function startQueue(blockIndex = 0, blockOffset = 0, clickedEntry = null) {
+    followReading = true;
     const selected = state.queue[state.index];
     if (state.pendingRender && selected?.blockKey === blockEntries[blockIndex]?.key && selected.blockOffset === blockOffset) return;
     if (!clickedEntry) ensureOrderedEntries();
@@ -694,7 +787,7 @@
     releaseAudioObjectUrl();
     els.audio.removeAttribute('src');
     els.audio.load();
-    els.track.style.width = '0%';
+    els.track.style.transform = 'scaleX(0)';
     clearCurrentBlock();
     updateTransport();
     if (state.ready) {
@@ -721,7 +814,7 @@
     releaseAudioObjectUrl();
     els.audio.removeAttribute('src');
     els.audio.load();
-    els.track.style.width = '0%';
+    els.track.style.transform = 'scaleX(0)';
     clearCurrentBlock();
     updateTransport();
     if (state.ready) setStatus(readyMessage(), blockEntries.length ? 'ready' : 'error');
@@ -813,7 +906,7 @@
         if (result.done) {
           characterCount += result.text.length - entry.text.length;
           Object.assign(entry, { text: result.text, partial: false, domRevision: ++domRevision });
-          extractionCache.set(entry.node, { text: result.text, revision: entry.domRevision });
+          extractionCache.set(entry.node, { epoch: insertionEpoch, text: result.text, revision: entry.domRevision });
           dirtyTextNodes.delete(entry.node);
           resolve(); return;
         }
@@ -853,7 +946,7 @@
       releaseAudioObjectUrl();
       els.audio.removeAttribute('src');
       els.audio.load();
-      els.track.style.width = '0%';
+      els.track.style.transform = 'scaleX(0)';
       clearCurrentBlock();
       updateTransport();
       if (state.ready) setStatus(edited ? 'This passage changed — click it to read the updated text.' : readyMessage(), 'ready');
@@ -866,8 +959,7 @@
       }
     });
     nextEntries.forEach(entry => (entry.nodes || [entry.node]).forEach(node => {
-      node.classList.add(pageClass);
-      node.classList.toggle('sonora-code-block', entry.kind === 'code');
+      markReadable(node, entry);
       if (isGoogleDocsPage()) node.classList.add('sonora-docs-passage');
       knownBlocks.add(node);
     }));
@@ -895,6 +987,12 @@
     updateMeta();
     if (isGoogleDocsPage() && state.ready && !state.queue.length) setStatus(readyMessage(), blockEntries.length ? 'ready' : 'error');
   }
+  function markReadable(node, entry) {
+    knownBlocks.add(node);
+    if (isChatGPTPage() && node.closest('[data-testid^="conversation-turn-"],[data-message-id]')) return;
+    node.classList.add(pageClass);
+    node.classList.toggle('sonora-code-block', entry.kind === 'code');
+  }
   function indexEntry(entry) {
     entriesByKey.set(entry.key, entry);
     (entry.nodes || [entry.node]).forEach(node => entriesByNode.set(node, entry));
@@ -918,6 +1016,8 @@
   }
 
   function refreshBlocks() {
+    if (refreshIdle !== null) cancelIdleCallback(refreshIdle);
+    refreshIdle = null;
     refreshTimer = null;
     const navigated = !isGoogleDocsPage() && window.SonoraPassages.pageIdentity(sourceUrl) !== window.SonoraPassages.pageIdentity(location.href);
     if (isChatGPTPage() && dirtyScopes.size && !fullRefreshPending && !navigated && source.root?.isConnected) {
@@ -937,8 +1037,7 @@
         entriesByScope.delete(scope);
         next.forEach(entry => {
           indexEntry(entry);
-          entry.node.classList.add(pageClass);
-          entry.node.classList.toggle('sonora-code-block', entry.kind === 'code');
+          markReadable(entry.node, entry);
           knownBlocks.add(entry.node);
         });
         if (activeItem && previous.some(entry => entry.key === activeItem.blockKey)) {
@@ -967,6 +1066,7 @@
       source.truncated = nextSource.truncated;
       source.noiseSelector = nextSource.noiseSelector;
       els.title.textContent = source.title || document.title || 'Untitled page';
+      observeSource();
     }
     if (!isGoogleDocsPage()) { discoverPage(); return; }
     ensureOrderedEntries();
@@ -975,8 +1075,12 @@
     updateBlocks(nextBlocks, navigated);
   }
   function scheduleBlockRefresh(records) {
-    wordTracker.invalidate();
     const mutations = records && typeof records[Symbol.iterator] === 'function';
+    if (mutations && isChatGPTPage()) {
+      records = window.SonoraPassages.contentMutations(records, root, source.root);
+      if (!records.length && sourceUrl === location.href) return;
+    }
+    wordTracker.invalidate();
     if (mutations) {
       for (const record of records) {
         let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
@@ -990,9 +1094,7 @@
         // their live text, including blocks excluded by an earlier extraction.
         for (const added of record.addedNodes || []) {
           if (added.nodeType !== Node.ELEMENT_NODE) continue;
-          dirtyTextNodes.add(added);
-          const walker = document.createTreeWalker(added, 1); // SHOW_ELEMENT
-          while (walker.nextNode()) dirtyTextNodes.add(walker.currentNode);
+          insertedRoots.set(added, ++insertionEpoch);
         }
       }
     }
@@ -1009,12 +1111,15 @@
       if (!dirtyScopes.size && !fullRefreshPending && sourceUrl === location.href) return;
     } else fullRefreshPending = true;
     if (refreshTimer) return;
-    refreshTimer = setTimeout(refreshBlocks, 100);
+    refreshTimer = setTimeout(() => {
+      if (globalThis.requestIdleCallback) refreshIdle = requestIdleCallback(refreshBlocks, { timeout: 500 });
+      else refreshBlocks();
+    }, 100);
   }
   let discoveryHandle = null, discoveryGeneration = 0, indexingDone = false, discoveryFrontier = null;
   let panelPainted = false;
   let panelPaintFrame = requestAnimationFrame(() => {
-    panelPaintFrame = requestAnimationFrame(() => { panelPaintFrame = null; panelPainted = true; });
+    panelPaintFrame = requestAnimationFrame(() => { panelPaintFrame = null; setTurnContainment(true); panelPainted = true; });
   });
   let finishDiscovery;
   const whenIndexed = new Promise(resolve => { finishDiscovery = resolve; });
@@ -1047,11 +1152,12 @@
       discoveryHandle = null;
       if (state.closed || generation !== discoveryGeneration) return;
       if (!panelPainted && !document.hidden) { discoveryHandle = setTimeout(batch, 16); return; }
+      if (performance.now() - lastPositionChange < 150 && !state.queueWaiting) { discoveryHandle = setTimeout(batch, 150); return; }
       if (priorityReaders.size) { discoveryHandle = setTimeout(batch, 16); return; }
       const started = performance.now();
       do {
         if (reading && !reading.node.isConnected) reading = null;
-        if (reading && entriesByNode.has(reading.node) && !entriesByNode.get(reading.node).partial && !dirtyTextNodes.has(reading.node)) reading = null;
+        if (reading && entriesByNode.has(reading.node) && !entriesByNode.get(reading.node).partial && !isTextDirty(reading.node)) reading = null;
         if (reading) {
           const result = reading.reader.advance(2);
           if (!result.done) break;
@@ -1061,7 +1167,7 @@
             break;
           }
           if (!node.isConnected) { reading = null; continue; }
-          extractionCache.set(node, { text: result.text, revision: ++domRevision });
+          extractionCache.set(node, { epoch: insertionEpoch, text: result.text, revision: ++domRevision });
           dirtyTextNodes.delete(node);
           const old = entriesByNode.get(node);
           if (old) {
@@ -1081,21 +1187,21 @@
           if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); resumeDiscoveredQueue(); updateMeta(); return; }
           const node = next.value;
           discoveryFrontier = node;
-          if (!window.SonoraPassages.visibleBlock(node)) continue;
+          if (!window.SonoraPassages.visibleBlock(node, Boolean(visibilityStyle))) continue;
           seenNodes.add(node);
-          if (entriesByNode.has(node) && !entriesByNode.get(node).partial && !dirtyTextNodes.has(node)) continue;
+          if (entriesByNode.has(node) && !entriesByNode.get(node).partial && !isTextDirty(node)) continue;
           reading = { node, version: textVersions.get(node) || 0, reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
         }
       } while (performance.now() - started < 4);
       resumeDiscoveredQueue();
       updateMeta();
-      discoveryHandle = setTimeout(batch, 0);
+      discoveryHandle = setTimeout(batch, codeScrolling ? 150 : 16);
     }
     function addDiscovered(node) {
       for (const entry of reconcileEntries([], makeIncomingEntries([node]))) {
         entry.index = blockEntries.length;
         indexEntry(entry); blockEntries.push(entry);
-        node.classList.add(pageClass); node.classList.toggle('sonora-code-block', entry.kind === 'code'); knownBlocks.add(node);
+        markReadable(node, entry);
         const snapshot = state.queueBlocks;
         if (snapshot && (snapshot[0].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
           && !snapshot.some(block => block.key === entry.key)) {
@@ -1140,8 +1246,7 @@
       for (const entry of reconcileEntries([], makeIncomingEntries([block], 2400))) {
         entry.index = blockEntries.length;
         indexEntry(entry); blockEntries.push(entry); knownBlocks.add(block);
-        block.classList.add(pageClass);
-        block.classList.toggle('sonora-code-block', entry.kind === 'code');
+        markReadable(block, entry);
       }
     }
     handlePageClick(event, block);
@@ -1163,11 +1268,14 @@
   };
   document.addEventListener('pointerdown', docsPointerDownListener, true);
   const docsPointerListener = event => {
+    if (!indexingDone) lastPositionChange = performance.now();
     if (!isGoogleDocsPage()) {
       if (!codeEntryCount) return;
       const target = event.target instanceof Element ? event.target : null;
-      codeHoverPoint = { x: event.clientX, y: event.clientY, block: target ? target.closest('.sonora-code-block') : undefined };
-      scheduleCodeHover();
+      const block = target?.closest('pre');
+      if (!block && !codeHoverPoint?.block) return;
+      codeHoverPoint = { x: event.clientX, y: event.clientY, block };
+      if (!codeScrolling) scheduleCodeHover(true);
       return;
     }
     const surface = googleDocsSurface(source.root);
@@ -1177,29 +1285,62 @@
     docsHover = next;
     docsHover?.nodes.forEach(node => node.classList.add('sonora-hover-block'));
   };
-  document.addEventListener('pointermove', docsPointerListener, true);
+  document.addEventListener('pointermove', docsPointerListener, { capture: true, passive: true });
+  const wheelActivityListener = () => {
+    if (!indexingDone || state.queue.length || codeHoverPoint?.block || codeMarks.size) wordPositionListener();
+    if (state.queue.length) followReading = false;
+  };
+  document.addEventListener('wheel', wheelActivityListener, { capture: true, passive: true });
   const wordPositionListener = () => {
-    wordTracker.invalidate();
-    if (!state.playing && state.index >= 0 && !state.completed) paintCurrentWord();
-    if (!isGoogleDocsPage() && codeEntryCount) {
-      codeScrolling = true;
+    // Scrolling is user-owned. Suspend geometry/paint until it settles; never
+    // materialize an off-screen turn just to follow an inaudible visual mark.
+    lastPositionChange = performance.now();
+    if (!state.queue.length && !codeHoverPoint?.block && !codeMarks.size) return;
+    if (lastPositionChange > autoScrollUntil) followReading = false;
+    if (codeScrolling) return;
+    codeScrolling = true;
+    stopWordFrames();
+    if (positionFrame === null) positionFrame = requestAnimationFrame(() => {
+      positionFrame = null;
+      wordTracker.suspend();
+      markCodePart(null, null, 'sonora-current-code');
+      markCodePart(null, null, 'sonora-hover-code');
+    });
+    function settled() {
+      codeScrollTimer = null;
+      if (performance.now() - lastPositionChange < 150) { codeScrollTimer = setTimeout(settled, 150); return; }
+      codeScrolling = false;
+      wordTracker.invalidate();
+      if (state.playing) startWordFrames();
+      else if (state.index >= 0 && !state.completed) paintCurrentWord();
+      if (state.webAudioBuffer) updateProgress(webAudioPosition());
       if (codeHoverPoint) codeHoverPoint.block = undefined;
-      if (codeScrollTimer !== null) clearTimeout(codeScrollTimer);
-      codeScrollTimer = setTimeout(() => { codeScrollTimer = null; codeScrolling = false; scheduleCodeHover(true); }, 80);
       scheduleCodeHover(true);
     }
+    codeScrollTimer = setTimeout(settled, 150);
   };
-  document.addEventListener('scroll', wordPositionListener, true);
-  window.addEventListener('resize', wordPositionListener);
+  document.addEventListener('scroll', wordPositionListener, { capture: true, passive: true });
+  window.addEventListener('resize', wordPositionListener, { passive: true });
   window.addEventListener('popstate', scheduleBlockRefresh);
   window.addEventListener('hashchange', scheduleBlockRefresh);
-  const pageObserver = new MutationObserver(scheduleBlockRefresh);
+  const pageObserver = new MutationObserver(records => {
+    // React can move the same conversation beneath new wrappers. Rebind the
+    // shallow ancestor watches without rediscovering its unchanged passages.
+    if (source.root?.isConnected && records.some(record => !source.root.contains(record.target)
+      && [...record.removedNodes].some(node => node.nodeType === 1 && node.contains(source.root)))) {
+      observeSource();
+      wordPositionListener();
+    }
+    scheduleBlockRefresh(records);
+  });
   const observeSource = () => {
-    // Observe the document rather than one article node. SPA navigation and
-    // editors commonly replace the readable root in place.
-    const rootNode = document.body || document.documentElement || source.root;
+    pageObserver.disconnect();
+    const rootNode = source.root || document.body || document.documentElement;
     if (!rootNode) return false;
     pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-hidden', 'style'] });
+    // Watch only direct child replacement on the ancestor chain. Sidebar and
+    // composer traffic outside the source needs no subtree observer.
+    for (let ancestor = rootNode.parentElement; ancestor; ancestor = ancestor.parentElement) pageObserver.observe(ancestor, { childList: true });
     return true;
   };
   if (!observeSource()) {
@@ -1264,8 +1405,9 @@
   });
   els.stop.addEventListener('click', stop);
   els.audio.addEventListener('timeupdate', () => {
+    if (codeScrolling) return;
     const part = els.audio.duration ? els.audio.currentTime / els.audio.duration : 0;
-    els.track.style.width = `${Math.min(100, ((state.index + part) / Math.max(1, state.queue.length)) * 100)}%`;
+    els.track.style.transform = `scaleX(${Math.min(1, (state.index + part) / Math.max(1, state.queue.length))})`;
   });
   els.audio.addEventListener('ended', () => {
     if (state.audioRevision === state.revision) advanceQueue(state.revision);
@@ -1304,7 +1446,7 @@
       state.pendingRender = false;
       state.completed = true;
       resetWords();
-      els.track.style.width = '100%';
+      els.track.style.transform = 'scaleX(1)';
       updateTransport();
       setStatus('Page section complete — click another block to jump.', 'ready');
     }
@@ -1347,7 +1489,10 @@
     if (currentBlock !== undefined) startQueue(currentBlock);
     else if (hadQueue) startQueue(0);
   });
-  els.minimize.addEventListener('click', () => els.panel.classList.toggle('is-hidden'));
+  function togglePanel() {
+    els.panel.classList.toggle('is-hidden');
+  }
+  els.minimize.addEventListener('click', togglePanel);
   els.close.addEventListener('click', () => {
     resetWords();
     wordTracker.reset(true); codeRange.reset();
@@ -1363,21 +1508,26 @@
     state.audioContext = null;
     releaseAudioObjectUrl();
     pageObserver.disconnect();
+    setTurnContainment(false, true);
+    document.removeEventListener('contentvisibilityautostatechange', visibilityListener, true);
     chrome.runtime.onMessage?.removeListener(renderReadyListener);
     document.removeEventListener('click', pageClickListener, true);
     document.removeEventListener('pointerdown', docsPointerDownListener, true);
     document.removeEventListener('pointermove', docsPointerListener, true);
+    document.removeEventListener('wheel', wheelActivityListener, true);
     document.removeEventListener('scroll', wordPositionListener, true);
     window.removeEventListener('resize', wordPositionListener);
     window.removeEventListener('popstate', scheduleBlockRefresh);
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (refreshIdle !== null) cancelIdleCallback(refreshIdle);
     if (discoveryHandle !== null) clearTimeout(discoveryHandle);
     if (panelPaintFrame !== null) cancelAnimationFrame(panelPaintFrame);
     discoveryGeneration++;
     if (codeHoverFrame !== null) cancelAnimationFrame(codeHoverFrame);
     if (codeHoverTimer !== null) clearTimeout(codeHoverTimer);
     if (codeScrollTimer !== null) clearTimeout(codeScrollTimer);
+    if (positionFrame !== null) cancelAnimationFrame(positionFrame);
     clearInterval(navigationTimer);
     if (state.voiceTimer) clearTimeout(state.voiceTimer);
     knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block'));
@@ -1390,7 +1540,7 @@
   window.__sonoraOverlay = {
     version: OVERLAY_VERSION,
     whenIndexed,
-    toggle: () => els.panel.classList.toggle('is-hidden'),
+    toggle: togglePanel,
     dispose: () => els.close.click()
   };
   loadSettings();
@@ -1399,12 +1549,12 @@
   function readableText(node, limit = Infinity) {
     if (!node) return '';
     const cached = extractionCache.get(node);
-    if (cached && !dirtyTextNodes.has(node) && (!cached.partial || limit < Infinity)) return cached.text;
+    if (cached && !isTextDirty(node) && (!cached.partial || limit < Infinity)) return cached.text;
     const contentNode = node.matches?.('pre') ? node.querySelector('code') || node : node;
     const text = isGoogleDocsPage() && contentNode.matches?.('g[role="paragraph"]')
       ? cleanText([...contentNode.querySelectorAll('rect[aria-label]')].map(rect => rect.getAttribute('aria-label')).join(' '))
       : window.SonoraPassages.readableText(contentNode, cleanText, limit);
-    extractionCache.set(node, { text, revision: ++domRevision, partial: limit < Infinity && contentNode.textContent.length >= limit });
+    extractionCache.set(node, { epoch: insertionEpoch, text, revision: ++domRevision, partial: limit < Infinity && contentNode.textContent.length >= limit });
     dirtyTextNodes.delete(node);
     return text;
   }
@@ -1453,7 +1603,7 @@
       return surface ? [...surface.querySelectorAll('svg g[role="paragraph"]')].filter(node => node.querySelector('rect[aria-label]')) : [];
     }
     return [...window.SonoraPassages.blockCandidates(root, noiseSelector)].filter(node => {
-      if (!window.SonoraPassages.visibleBlock(node)) return false;
+      if (!window.SonoraPassages.visibleBlock(node, Boolean(visibilityStyle))) return false;
       const value = readableText(node);
       return value.length > (node.matches('pre,td,th,[role="cell"],[role="gridcell"]') ? 0 : 1);
     });

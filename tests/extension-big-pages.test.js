@@ -47,7 +47,7 @@ test('controls and a clicked turn work before the rest of a 2,000-turn page is i
   await page.evaluate(`document.querySelector('[data-testid="conversation-turn-1999"] p').click()`);
   assert.match(await page.evaluate(`messages.find(item => item.type === 'sonora-render')?.text`), /Turn 1999/);
   await page.evaluate('startIndex(); window.__sonoraOverlay.whenIndexed');
-  assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 2400);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^2400 clickable blocks/);
   assert.deepEqual(page.errors, []);
 });
 
@@ -156,11 +156,14 @@ test('clicking deep in an oversized code line selects a bounded chunk containing
   assert.deepEqual(page.errors, []);
 });
 
-test('the overlay contains its layout and code clicks prevent native whole-page selection', async t => {
+test('the overlay leaves page dimensions unchanged and code clicks prevent native whole-page selection', async t => {
   const page = await browser(t, '<main><pre><code>first();\nnext();</code></pre></main>');
   if (!page) return;
   await install(page);
-  assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('#sonora-overlay-root')).contain`), 'strict');
+  assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('#sonora-overlay-root')).position`), 'fixed');
+  const dimensions = await page.evaluate('({height: document.documentElement.scrollHeight, width: document.documentElement.scrollWidth})');
+  await page.evaluate(`panel.querySelector('.status span').textContent = 'Long playback status '.repeat(100)`);
+  assert.deepEqual(await page.evaluate('({height: document.documentElement.scrollHeight, width: document.documentElement.scrollWidth})'), dimensions);
   const result = await page.evaluate(`(() => {
     const code = document.querySelector('code');
     const prevented = !code.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, button: 0}));
@@ -243,7 +246,7 @@ test('replacing a turn during initial idle indexing does not abandon the rest of
   })()`);
   await page.evaluate('window.__sonoraOverlay.whenIndexed');
   await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(await page.evaluate(`document.querySelectorAll('.sonora-readable-block').length`), 600);
+  assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^600 clickable blocks/);
   await page.evaluate(`document.querySelector('[data-testid="conversation-turn-499"] p').click()`);
   assert.match(await page.evaluate(`messages.find(item => item.type === 'sonora-render')?.text`), /Turn 499/);
   assert.deepEqual(page.errors, []);

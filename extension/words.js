@@ -433,7 +433,7 @@
     }
     function reset(release = false) { clearPaint(); words = []; spans = []; item = null; if (release) resolve.reset(); }
 
-    return { prepare, update, reset, invalidate: () => { clip = null; } };
+    return { prepare, update, reset, suspend: () => { clearPaint(); clip = null; }, invalidate: () => { clip = null; } };
   }
 
   const api = { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, clipFor, createTracker };

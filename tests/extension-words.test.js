@@ -238,9 +238,9 @@ test('a highlight in a 20,000-line node indexes only the text needed by that wor
   const entry = { node, text: node.textNodes.map(child => child.data).join(''), domRevision: 1 };
   const resolve = createRangeResolver(document);
   assert.equal(resolve(entry, 0, 4).startContainer, node.textNodes[0]);
-  assert.equal(visited, 2);
+  assert(visited >= 1 && visited <= 2, 'only the requested node and optional grapheme lookahead may be visited');
   for (let frame = 0; frame < 100; frame++) resolve(entry, 0, 4);
-  assert.equal(visited, 2);
+  assert(visited <= 2, 'a frame budget may defer lookahead, but must never walk the rest of the code');
 });
 
 
@@ -291,4 +291,19 @@ test('the sparse DOM cache retains a bounded window after traversing thousands o
   let opening;
   for (let frame = 0; frame < 200 && !opening; frame++) opening = resolve(entry, 0, 5);
   assert.equal(opening.startContainer, node.textNodes[0], 'jumping backward rebuilds the bounded index');
+});
+
+
+test('suspending word paint preserves timings and repaints the same word after scrolling', () => {
+  const { tracker, highlights, makeNode } = domTrackerFixture();
+  const node = makeNode('Read this'), entry = { node, text: 'Read this', domRevision: 1 };
+  tracker.prepare(entry, { text: entry.text, blockOffset: 0 }, [{ start: 0, end: 1, textOffset: 5, length: 4 }]);
+  tracker.update(entry, .2, null);
+  assert(highlights.has('sonora-current-word'));
+  tracker.suspend();
+  assert.equal(highlights.has('sonora-current-word'), false);
+  tracker.update(entry, .3, null);
+  const range = [...highlights.get('sonora-current-word')][0];
+  assert.equal(range.startOffset, 5);
+  assert.equal(range.endOffset, 9);
 });
