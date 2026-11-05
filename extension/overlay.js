@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.10';
+  const OVERLAY_VERSION = '0.4.11';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();

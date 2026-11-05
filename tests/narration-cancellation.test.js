@@ -13,6 +13,7 @@ function backend(t, { ready = true, readyTimeoutMs = 120000 } = {}) {
   child.kill = () => child.emit('exit', 0);
   const context = { __dirname, module: { exports: {} }, setTimeout, clearTimeout, Buffer, URL, AbortController, process, require(name) {
     if (name === './config') return { python: 'fixture', modelDir: '/fixture', cacheDir: '/fixture', voices: [{ id: 'af_heart' }] };
+    if (name === './cache') return { lease: async () => { throw new Error('no cache'); } };
     if (name === 'fs') return { existsSync: () => true, promises: { readFile: async () => { throw new Error('no cache'); } } };
     if (name === 'child_process') return { spawn: () => child };
     return require(name);

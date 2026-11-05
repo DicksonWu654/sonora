@@ -112,7 +112,11 @@ Text is normalized to remove import artifacts, then split at paragraph, sentence
 
 FFmpeg joins cached passages on disk into 24 kHz mono, 96 kb/s MP3; the browser never holds a whole book's decoded audio. RSS enclosures include file sizes and durations, and audio routes support HEAD and byte ranges for downloads and seeking. Browser voices are a listening fallback; downloadable MP3s use Kokoro.
 
-Private text, credentials, checkpoints, logs, and MP3s live in `.runtime/` (or `SONORA_DATA`). Model assets and per-passage WAV caches live in `~/.cache/sonora` (or `NARRATION_HOME`). These are excluded from Git. Long books can consume several GB of WAV cache and produce MP3s of hundreds of MB. Keep the WAV cache while an incomplete job may need to resume. Back up `.runtime/` for the feed credentials and finished books.
+Private text, credentials, checkpoints, and MP3s live in `.runtime/` (or `SONORA_DATA`). Model assets and per-passage WAV caches live in `~/.cache/sonora` (or `NARRATION_HOME`). These are excluded from Git. Back up `.runtime/` for the feed credentials and finished books. The server and supervisor send logs to stdout/stderr; configure rotation in any service or shell that redirects them to files.
+
+The render cache defaults to a 2 GiB LRU target. Set `SONORA_AUDIO_CACHE_MB` (default `2048`) before starting Sonora to change it. Cache hits refresh both audio and timing metadata; cleanup runs at worker startup and at most once per minute after writes. Active readers/writers are protected, so usage can temporarily exceed the target between cleanup passes or while entries are in use. Orphaned audio, metadata, and interrupted writes are cleaned up together.
+
+Book storage has a separate `SONORA_BOOKS_MB` quota (default `2048` MiB), including checkpoints, temporary WAV parts, and finished MP3s. Sonora preserves saved books and stops new output when this quota is reached. Remove unneeded books or raise the quota, then retry the saved job. Long books may need a larger quota. Job-owned WAV parts survive render-cache eviction and are removed after successful MP3 assembly.
 
 ## Checks
 

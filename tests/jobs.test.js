@@ -25,6 +25,10 @@ function fixture(t) {
   const cacheDirectory = path.join(root, 'cache'); fs.mkdirSync(cacheDirectory);
   let renders = 0;
   const cache = new Set();
+  const wav = Buffer.alloc(48044);
+  wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(48000, 40);
   let fail = false, rejectLarge = false;
   const narration = {
     status: () => ({ ready: true, installed: true }),
@@ -32,12 +36,13 @@ function fixture(t) {
       if (fail && text.includes('FAILHERE')) throw Object.assign(new Error('Injected model failure'), { status: 422 });
       if (rejectLarge && text.length > 170) throw Object.assign(new Error('Injected passage overflow'), { status: 422 });
       const key = crypto.createHash('sha256').update(text).digest('hex');
-      if (!cache.has(key)) { renders++; cache.add(key); fs.writeFileSync(path.join(cacheDirectory, key + '.wav'), 'fixture'); }
+      if (!cache.has(key) || !fs.existsSync(path.join(cacheDirectory, key + '.wav'))) { renders++; cache.add(key); fs.writeFileSync(path.join(cacheDirectory, key + '.wav'), wav); }
       return { audioUrl: `/api/narration/audio/${key}.wav`, duration: 1 };
     }
   };
   return { options: { directory: path.join(root, 'books'), cacheDirectory, ffmpeg: encoder, narration },
-    renders: () => renders, fail: value => { fail = value; }, rejectLarge: value => { rejectLarge = value; } };
+    renders: () => renders, fail: value => { fail = value; }, rejectLarge: value => { rejectLarge = value; },
+    evict() { for (const name of fs.readdirSync(cacheDirectory)) if (name.endsWith('.wav')) fs.unlinkSync(path.join(cacheDirectory, name)); } };
 }
 test('a failed book resumes from its saved cache after a server restart', async t => {
   const f = fixture(t); f.fail(true);
@@ -67,6 +72,81 @@ test('model overflow triggers smaller passages and publishes only complete audio
   assert.equal(done.state, 'complete'); assert(done.duration > done.total);
   const feed = rss(jobs.list(), 'https://example.com', 'private');
   assert(feed.includes('<title>A &amp; B</title>')); assert(feed.includes('type="audio/mpeg"')); assert(feed.includes('length="4096"'));
+});
+
+test('book assembly survives render-cache eviction and removes disposable parts', async t => {
+  const f = fixture(t), generate = f.options.narration.generate;
+  f.options.narration.generate = async (...args) => { f.evict(); return generate(...args); };
+  fs.writeFileSync(f.options.ffmpeg, `#!/usr/bin/env node
+const fs=require('node:fs');const list=fs.readFileSync(process.argv[process.argv.indexOf('-i')+1],'utf8');
+for(const line of list.split('\\n'))if(!fs.existsSync(line.slice(6,-1)))throw Error('A book part was evicted');
+fs.writeFileSync(process.argv.at(-1),Buffer.alloc(4096));
+`, {mode: 0o700});
+  const jobs = createBookJobs(f.options); t.after(() => jobs.close());
+  const job = jobs.create({text: 'Read this complete book. '.repeat(180), title: 'Eviction during a book'});
+  const done = await terminal(jobs, job.id);
+  assert.equal(done.state, 'complete', done.error);
+  const folder = path.dirname(jobs.audioFile(job.id));
+  assert(!fs.existsSync(path.join(folder, 'parts')));
+  assert(!fs.existsSync(path.join(folder, 'concat.txt')));
+  assert(!fs.existsSync(path.join(folder, 'book.tmp.mp3')));
+});
+
+test('a saved book resumes without re-rendering healthy staged parts after cache eviction', async t => {
+  const f = fixture(t); f.fail(true);
+  let jobs = createBookJobs(f.options);
+  const job = jobs.create({text: 'Healthy opening. '.repeat(75) + '\n\n' + 'FAILHERE another passage. '.repeat(80)});
+  const failed = await terminal(jobs, job.id);
+  assert.equal(failed.state, 'failed'); assert(failed.completed > 0);
+  const before = f.renders();
+  jobs.close(); f.evict(); f.fail(false);
+  jobs = createBookJobs(f.options); t.after(() => jobs.close());
+  jobs.retry(job.id);
+  const done = await terminal(jobs, job.id);
+  assert.equal(done.state, 'complete', done.error);
+  assert.equal(f.renders() - before, done.total - failed.completed);
+});
+
+test('book storage quotas stop new output while preserving completed books', async t => {
+  const f = fixture(t);
+  let jobs = createBookJobs(f.options);
+  const job = jobs.create({text: 'A saved book.', title: 'Keep me'});
+  assert.equal((await terminal(jobs, job.id)).state, 'complete');
+  const file = jobs.audioFile(job.id); fs.writeFileSync(file, Buffer.alloc(50000, 1));
+  jobs.close(); jobs = createBookJobs({...f.options, maxBytes: 80000}); t.after(() => jobs.close());
+  assert.throws(() => jobs.create({text: 'Another book.'}), error => error.status === 507 && /SONORA_BOOKS_MB/.test(error.message));
+  assert.equal(jobs.list().length, 1);
+  assert.equal(fs.statSync(file).size, 50000);
+});
+
+test('book quota failures retain checkpoints and remove truncated encodes', async t => {
+  const f = fixture(t);
+  fs.writeFileSync(f.options.ffmpeg, `#!/usr/bin/env node
+const fs=require('node:fs');const limit=Number(process.argv[process.argv.indexOf('-fs')+1]);
+fs.writeFileSync(process.argv.at(-1),Buffer.alloc(limit));
+`, {mode: 0o700});
+  const jobs = createBookJobs({...f.options, maxBytes: 300000}); t.after(() => jobs.close());
+  const job = jobs.create({text: 'This encode reaches the storage limit.'});
+  const done = await terminal(jobs, job.id);
+  assert.equal(done.state, 'failed'); assert.match(done.error, /SONORA_BOOKS_MB/);
+  const folder = path.dirname(jobs.audioFile(job.id));
+  assert(fs.existsSync(path.join(folder, 'job.json')));
+  for (const name of ['book.mp3', 'book.tmp.mp3', 'concat.txt']) assert(!fs.existsSync(path.join(folder, name)));
+  assert(fs.existsSync(path.join(folder, 'parts')));
+  const {sizeOf} = require('../tools/books/storage');
+  assert(sizeOf(f.options.directory) <= 300000);
+});
+
+test('startup cleanup does not follow a book-directory symlink', t => {
+  const f = fixture(t), id = 'a'.repeat(24);
+  const outside = path.join(path.dirname(f.options.directory), 'outside');
+  fs.mkdirSync(outside); fs.mkdirSync(f.options.directory);
+  fs.writeFileSync(path.join(outside, 'job.json'), JSON.stringify({id, state: 'complete', chunks: []}));
+  fs.writeFileSync(path.join(outside, 'concat.txt'), 'keep');
+  fs.symlinkSync(outside, path.join(f.options.directory, id), 'dir');
+  const jobs = createBookJobs(f.options); t.after(() => jobs.close());
+  assert.equal(jobs.list().length, 0);
+  assert.equal(fs.readFileSync(path.join(outside, 'concat.txt'), 'utf8'), 'keep');
 });
 test('podcast byte ranges support seeking, suffixes, HEAD and invalid ranges', async t => {
   const f = fixture(t);

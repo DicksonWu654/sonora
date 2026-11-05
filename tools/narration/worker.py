@@ -1,10 +1,13 @@
 """Persistent local Kokoro worker. stdout is JSON-lines; diagnostics use stderr."""
-import os, sys, json, re, time, hashlib, unicodedata, struct, math
+import os, sys, json, re, time, hashlib, unicodedata, struct, math, tempfile
 from pathlib import Path
+from audio_cache import AudioCache
 
 HOME = Path(os.environ.get('NARRATION_HOME', Path.home() / '.cache' / 'sonora'))
 MODEL = HOME / 'narration-model'
 CACHE = HOME / 'narration-audio'
+CACHE_STORE = AudioCache(CACHE)
+CACHE_STORE.prune(force=True)
 REVISION = 'f3ff3571791e39611d31c381e3a41a3af07b4987'
 VERSION = 'kokoro-0.9.4-books-2'
 VOICES = ('af_heart', 'af_bella')
@@ -99,12 +102,11 @@ def speech_batches(tokens):
         raise ValueError('Passage exceeds the local model chunk limit.')
     return batches
 
-def read_cache(key, text, voice):
+def _read_cache(key, text, voice):
     """A damaged/interrupted cache entry is a miss, never a permanent error."""
     try:
-        audio_file = CACHE / (key + '.wav')
-        size = audio_file.stat().st_size
-        with audio_file.open('rb') as file:
+        with CACHE_STORE.open(key, '.wav') as file:
+            size = os.fstat(file.fileno()).st_size
             header = file.read(44)
         if len(header) != 44 or header[:4] != b'RIFF' or header[8:16] != b'WAVEfmt ' or header[36:40] != b'data':
             return None
@@ -112,7 +114,8 @@ def read_cache(key, text, voice):
             return None
         if struct.unpack_from('<HHI', header, 20) != (1, 1, 24000) or struct.unpack_from('<H', header, 34)[0] != 16:
             return None
-        data = json.loads((CACHE / (key + '.json')).read_text())
+        with CACHE_STORE.open(key, '.json') as file:
+            data = json.load(file)
         duration = (size - 44) / 48000
         if data.get('voice') != voice or data.get('audioUrl') != '/api/narration/audio/' + key + '.wav' or not isinstance(data.get('duration'), (int, float)) or not math.isfinite(data['duration']) or abs(data['duration'] - duration) > .001:
             return None
@@ -127,10 +130,15 @@ def read_cache(key, text, voice):
             if type(offset) is not int or type(length) is not int or offset < 0 or length <= 0 or offset + length > utf16_len(text):
                 return None
             last = start
+        CACHE_STORE.touch(key)
         data['cached'] = True
         return data
     except (OSError, ValueError, TypeError, AttributeError, struct.error):
         return None
+
+def read_cache(key, text, voice):
+    with CACHE_STORE.use(key):
+        return _read_cache(key, text, voice)
 
 def render(text, voice):
     if not isinstance(text, str) or not text.strip() or len(text) > 4000 or '\x00' in text:
@@ -138,8 +146,15 @@ def render(text, voice):
     if voice not in VOICES:
         raise ValueError('Unknown local voice.')
     key = hashlib.sha256(json.dumps([VERSION, REVISION, voice, text], ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    with CACHE_STORE.use(key):
+        result = render_locked(key, text, voice)
+        if not result['cached']:
+            CACHE_STORE.prune()
+        return result
+
+def render_locked(key, text, voice):
     metadata_file, audio_file = CACHE / (key + '.json'), CACHE / (key + '.wav')
-    cached = read_cache(key, text, voice)
+    cached = _read_cache(key, text, voice)
     if cached is not None:
         return cached
     began = time.monotonic()
@@ -168,12 +183,22 @@ def render(text, voice):
         raise ValueError('No readable words were found in this passage.')
     audio = np.concatenate(chunks)
     result = {'audioUrl':'/api/narration/audio/' + key + '.wav', 'words':words, 'duration':len(audio)/24000, 'voice':voice, 'cached':False, 'generationSeconds':round(time.monotonic()-began, 3), 'engine':'Kokoro 0.9.4', 'timing':'model-derived'}
-    temporary_audio = CACHE / (key + '.wav.tmp')
-    temporary_metadata = CACHE / (key + '.json.tmp')
-    sf.write(temporary_audio, audio, 24000, format='WAV', subtype='PCM_16')
-    temporary_audio.replace(audio_file)
-    temporary_metadata.write_text(json.dumps(result))
-    temporary_metadata.replace(metadata_file)
+    metadata = json.dumps(result).encode()
+    if 44 + len(audio) * 2 + len(metadata) > CACHE_STORE.max_bytes:
+        raise ValueError('Passage exceeds SONORA_AUDIO_CACHE_MB; increase the cache limit.')
+    temporary = []
+    try:
+        with tempfile.NamedTemporaryFile(dir=CACHE, prefix=key + '.', suffix='.wav.tmp', delete=False) as file:
+            temporary.append(Path(file.name))
+            sf.write(file, audio, 24000, format='WAV', subtype='PCM_16')
+        with tempfile.NamedTemporaryFile(dir=CACHE, prefix=key + '.', suffix='.json.tmp', delete=False) as file:
+            temporary.append(Path(file.name))
+            file.write(metadata)
+        temporary[0].replace(audio_file)
+        temporary[1].replace(metadata_file)
+    finally:
+        for file in temporary:
+            file.unlink(missing_ok=True)
     return result
 
 def warm_up():

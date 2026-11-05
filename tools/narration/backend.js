@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const {spawn} = require('child_process');
 const readline = require('readline');
 const config = require('./config');
+const audioCache = require('./cache');
 
 function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
   let worker = null, state = 'not-installed', serial = 0, startupTimer, activeJob = null;
@@ -54,10 +55,12 @@ function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
   }
   function keyFor(text,voice) {return crypto.createHash('sha256').update(JSON.stringify([config.engineVersion,config.revision,voice,text])).digest('hex');}
   async function readCache(key,text,voice) {
-    let file;
+    let file, metadata, release;
     try {
-      const data=JSON.parse(await fs.promises.readFile(path.join(config.cacheDir,key+'.json'),'utf8'));
-      file=await fs.promises.open(path.join(config.cacheDir,key+'.wav'),'r');
+      release=await audioCache.lease(config.cacheDir,key);
+      metadata=await audioCache.openEntry(config.cacheDir,key,'.json');
+      const data=JSON.parse(await metadata.readFile('utf8'));
+      file=await audioCache.openEntry(config.cacheDir,key,'.wav');
       const stat=await file.stat(),header=Buffer.alloc(44);
       const {bytesRead}=await file.read(header,0,44,0);
       if(bytesRead!==44||stat.size<=44||header.toString('ascii',0,4)!=='RIFF'||header.toString('ascii',8,16)!=='WAVEfmt '||header.toString('ascii',36,40)!=='data'||header.readUInt32LE(4)!==stat.size-8||header.readUInt32LE(40)!==stat.size-44||header.readUInt16LE(20)!==1||header.readUInt16LE(22)!==1||header.readUInt32LE(24)!==24000||header.readUInt16LE(34)!==16)return null;
@@ -68,8 +71,9 @@ function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
         if(!word||!Number.isFinite(word.start)||!Number.isFinite(word.end)||word.start<0||word.start<last||word.end<=word.start||word.end>duration||!Number.isInteger(word.textOffset)||!Number.isInteger(word.length)||word.textOffset<0||word.length<=0||word.textOffset+word.length>text.length)return null;
         last=word.start;
       }
+      await audioCache.touch(config.cacheDir,key);
       return {...data,cached:true};
-    }catch{return null;}finally{await file?.close();}
+    }catch{return null;}finally{await file?.close();await metadata?.close();await release?.();}
   }
   function pump() {
     if(activeJob || !worker || state !== 'ready') return;
@@ -139,12 +143,14 @@ function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
     pump();
     return result;
   }
-  function serveAudio(req,res,pathname) {
+  async function serveAudio(req,res,pathname) {
     const match=/^\/api\/narration\/audio\/([a-f0-9]{64})\.wav$/.exec(pathname);
     if(!match){json(res,404,{error:'Audio not found.'});return;}
-    const file=path.join(config.cacheDir,match[1]+'.wav');
-    fs.stat(file,(error,stat)=>{
-      if(error || !stat.isFile()){json(res,404,{error:'Audio not found.'});return;}
+    let file,release,stream;
+    try {
+      release=await audioCache.lease(config.cacheDir,match[1]);
+      file=await audioCache.openEntry(config.cacheDir,match[1],'.wav');
+      const stat=await file.stat();
       let start=0,end=stat.size-1,status=200;
       if(req.headers.range){
         const range=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
@@ -156,10 +162,16 @@ function createNarrationBackend({authorize,readyTimeoutMs = 120000} = {}) {
       }
       const headers={'Content-Type':'audio/wav','Content-Length':end-start+1,'Accept-Ranges':'bytes','Cache-Control':'private, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'};
       if(status===206)headers['Content-Range']=`bytes ${start}-${end}/${stat.size}`;
+      await audioCache.touch(config.cacheDir,match[1]);
       res.writeHead(status,headers);
       if(req.method==='HEAD')return res.end();
-      fs.createReadStream(file,{start,end}).on('error',()=>res.destroy()).pipe(res);
-    });
+      if(res.destroyed)return;
+      stream=file.createReadStream({start,end});
+      res.on('close',()=>stream.destroy());
+      stream.on('close',()=>{release?.();});
+      stream.on('error',()=>res.destroy()).pipe(res);
+    }catch{if(!res.headersSent)json(res,404,{error:'Audio not found.'});else res.destroy();}
+    finally{if(!stream){await file?.close();await release?.();}}
   }
   async function handle(req,res,pathname) {
     if(!pathname.startsWith('/api/narration/'))return false;
