@@ -4,3 +4,5 @@
 - Keep chunking shared between the browser and server in `public/text.js`. Conversions must checkpoint on disk and continue without an open browser.
 - Check EPUB metadata and spine against the requested title; filenames can mislabel omnibus archives. Extract only the requested volume before narration.
 - Run `npm test` and a short real Kokoro conversion for changes to narration or assembly. Do not narrate a whole book just to test.
+
+- Scroll comparisons use `tools/profile-scroll.cjs` with at least five interleaved repetitions, a fixed fixture hash and wheel path, and recorded host load. Report median/IQR from the inner-scrollport fixture.

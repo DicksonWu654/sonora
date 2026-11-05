@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.8';
+  const OVERLAY_VERSION = '0.4.9';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -13,6 +13,8 @@
   // Start the local voice before any synchronous page discovery.
   let initialStatus = message({ type: 'sonora-status' });
   initialStatus.catch(() => {});
+  let pageType = pageTypeFor(location.href);
+  const CHATGPT_CONTAINMENT = 'coarse';
   const { cleanText, chunksFor } = window.BookText;
   const speed = window.SonoraSpeed;
   const MAX_PAGE_CHARS = 240000;
@@ -46,10 +48,24 @@
   }
   const textVersions = new WeakMap();
   const source = findReadableSource();
-  const visibilityStyle = isChatGPTPage() ? document.createElement('style') : null;
+  const visibilityStyle = isChatGPTPage() && CHATGPT_CONTAINMENT !== 'none' ? document.createElement('style') : null;
   const skippedTurns = new WeakSet();
   if (visibilityStyle) {
     visibilityStyle.id = 'sonora-chatgpt-visibility';
+  }
+  function scrollportsFor(node) {
+    const ports = [];
+    const scrollingElement = document.scrollingElement;
+    for (let parent = node?.parentElement; parent; parent = parent.parentElement) {
+      if (parent === scrollingElement || parent === document.body) continue;
+      if (/auto|scroll|overlay/.test(getComputedStyle(parent).overflowY) && parent.scrollHeight > parent.clientHeight) ports.push(parent);
+    }
+    if (scrollingElement?.scrollHeight > scrollingElement?.clientHeight) ports.push(scrollingElement);
+    return ports;
+  }
+  function relevantScroll(event) {
+    const target = event?.target;
+    return !target || target === document || target === window || source.root?.contains(target) || target.contains?.(source.root);
   }
   let containmentFrame = null;
   function setTurnContainment(enabled, remove = false) {
@@ -63,6 +79,7 @@
       if (anchor) break;
     }
     const top = anchor?.getBoundingClientRect().top;
+    const scrollport = scrollportsFor(anchor)[0];
     if (remove) visibilityStyle.remove();
     else {
       visibilityStyle.disabled = !enabled;
@@ -76,7 +93,9 @@
         const inset = style ? ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
           .reduce((sum, property) => sum + parseFloat(style[property]), 0) : 0;
         const estimate = Math.round(Math.min(1200, Math.max(32, average - inset)));
-        visibilityStyle.textContent = `[data-testid^="conversation-turn-"] { content-visibility: auto; contain-intrinsic-size: auto ${estimate}px; }`;
+        const selector = CHATGPT_CONTAINMENT === 'coarse' ? '[role="region"][aria-label="Conversation"]' : '[data-testid^="conversation-turn-"]';
+        const intrinsic = CHATGPT_CONTAINMENT === 'coarse' ? source.root.scrollHeight : estimate;
+        visibilityStyle.textContent = `${selector} { content-visibility: auto; contain-intrinsic-size: auto ${intrinsic}px; }`;
         (document.head || document.documentElement).append(visibilityStyle);
       }
     }
@@ -84,7 +103,7 @@
       containmentFrame = null;
       if (!anchor?.isConnected) return;
       const delta = anchor.getBoundingClientRect().top - top;
-      if (Math.abs(delta) > 1) scrollBy(0, delta);
+      if (scrollport && Math.abs(delta) > 1) scrollport.scrollTop += delta;
     };
     restore();
     containmentFrame = requestAnimationFrame(restore);
@@ -224,7 +243,8 @@
   const knownBlocks = new Set();
   const wordTracker = window.SonoraWords.createTracker(document, shadow);
   const codeRange = window.SonoraWords.createRangeResolver(document);
-  let wordFrame = null;
+  let wordFrame = null, geometryFrame = null;
+  let activeHighlightEntry = null, activeHighlightTurn = null;
   const changedSettings = new Set();
   const pageClass = PAGE_CLASS;
   const currentClass = CURRENT_CLASS;
@@ -242,7 +262,48 @@
   els.title.textContent = source.title || document.title || 'Untitled page';
   els.meta.textContent = `${blockEntries.length} clickable ${blockEntries.length === 1 ? 'block' : 'blocks'} · ${pageText.length.toLocaleString()} characters${source.truncated ? ' · first 240,000 shown' : ''}`;
 
-  function setStatus(message, mode = '') { state.status = message; els.status.textContent = message; els.dot.className = `dot ${mode}`; }
+  let panelWriteFrame = null;
+  let pendingPanel = {}, panelDirty = false;
+  function schedulePanelWrite() {
+    if (!panelDirty || panelWriteFrame !== null || wordFrame !== null || state.closed) return;
+    panelWriteFrame = requestAnimationFrame(flushPanelWrites);
+  }
+  function flushPanelWrites() {
+    if (panelWriteFrame !== null) cancelAnimationFrame(panelWriteFrame);
+    panelWriteFrame = null;
+    if (state.closed || !panelDirty) return;
+    panelDirty = false;
+    const pending = pendingPanel;
+    pendingPanel = {};
+    if (pending.status) {
+      const [message, mode] = pending.status;
+      if (els.status.textContent !== message) els.status.textContent = message;
+      const className = `dot ${mode}`;
+      if (els.dot.className !== className) els.dot.className = className;
+    }
+    if (pending.transport) {
+      const [playing, label] = pending.transport;
+      const icon = playing ? 'Ⅱ' : '▶';
+      if (els.playIcon.textContent !== icon) els.playIcon.textContent = icon;
+      if (els.playLabel.textContent !== label) els.playLabel.textContent = label;
+      els.play.classList.toggle('is-playing', playing);
+    }
+    if (pending.progress !== undefined) {
+      const transform = `scaleX(${pending.progress})`;
+      if (els.track.style.transform !== transform) els.track.style.transform = transform;
+    }
+  }
+  function setPanelProgress(value) {
+    pendingPanel.progress = value;
+    panelDirty = true;
+    schedulePanelWrite();
+  }
+  function setStatus(message, mode = '') {
+    state.status = message;
+    pendingPanel.status = [message, mode];
+    panelDirty = true;
+    schedulePanelWrite();
+  }
   function readyMessage() {
     if (isGoogleDocsPage() && !blockEntries.length) return 'Refresh this Google Doc once to enable passage highlights.';
     return 'Ready — click page text to begin.';
@@ -377,21 +438,42 @@
     const item = state.queue[state.index];
     return item && (item.blockKey ? entriesByKey.get(item.blockKey) : blockEntries[item.blockIndex]);
   }
+  function invalidateGeometry(records) {
+    if (!activeHighlightEntry || state.index < 0 || state.completed) return;
+    const affected = records.some(record => {
+      const target = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
+      return target && source.root?.contains(target) && (target.contains(activeHighlightEntry.node) || activeHighlightTurn?.contains(target));
+    });
+    if (!affected) return;
+    wordTracker.invalidate();
+    if (codeScrolling || geometryFrame !== null) return;
+    geometryFrame = requestAnimationFrame(() => {
+      geometryFrame = null;
+      if (state.closed || codeScrolling) return;
+      paintCurrentWord();
+      const item = state.queue[state.index];
+      if (activeHighlightEntry?.kind === 'code' && item) markCodePart(activeHighlightEntry, {text: item.text, offset: item.blockOffset}, 'sonora-current-code');
+    });
+  }
   function paintCurrentWord() {
-    if (codeScrolling || skippedTurns.has(currentEntry()?.node.closest('[data-testid^="conversation-turn-"]'))) return;
+    if (codeScrolling || skippedTurns.has(activeHighlightTurn)) return;
     const position = state.webAudioBuffer ? webAudioPosition() : els.audio.currentTime;
-    wordTracker.update(currentEntry(), position, isGoogleDocsPage() ? googleDocsSurface(source.root) : null);
+    wordTracker.update(activeHighlightEntry, position, isGoogleDocsPage() ? googleDocsSurface(source.root) : null);
   }
   function stopWordFrames() {
     if (wordFrame !== null) cancelAnimationFrame(wordFrame);
     wordFrame = null;
+    if (panelDirty) schedulePanelWrite();
   }
   function startWordFrames() {
     stopWordFrames();
     if (codeScrolling) return;
+    if (panelWriteFrame !== null) cancelAnimationFrame(panelWriteFrame);
+    panelWriteFrame = null;
     const tick = () => {
       wordFrame = null;
       if (state.closed || !state.playing) return;
+      flushPanelWrites();
       paintCurrentWord();
       wordFrame = requestAnimationFrame(tick);
     };
@@ -399,7 +481,7 @@
   }
   function resetWords() { stopWordFrames(); wordTracker.reset(); }
   function revealPassage(entry, item) {
-    if (!visibilityStyle || visibilityStyle.disabled || !entry?.node.isConnected || !followReading) return;
+    if (!isChatGPTPage() || !entry?.node.isConnected || !followReading) return;
     const turn = entry.node.closest('[data-testid^="conversation-turn-"]');
     if (!turn) return;
     autoScrollUntil = performance.now() + 300;
@@ -408,29 +490,31 @@
     if (!range) return;
     let rect = range.getClientRects()[0];
     if (!rect) return;
-    for (let node = range.startContainer.parentElement; node; node = node.parentElement) {
-      if (/auto|scroll/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight) {
-        const bounds = node.getBoundingClientRect();
-        if (rect.top < bounds.top || rect.bottom > bounds.bottom) {
-          node.scrollBy(0, rect.top - bounds.top - node.clientHeight / 3);
-          rect = range.getClientRects()[0];
-        }
+    for (const port of scrollportsFor(range.startContainer)) {
+      const viewport = port === document.scrollingElement;
+      const bounds = viewport ? { top: 0, bottom: innerHeight } : port.getBoundingClientRect();
+      const top = Math.max(60, bounds.top + (viewport ? 0 : port.clientTop));
+      const bottom = Math.min(innerHeight - 80, viewport ? bounds.bottom : bounds.top + port.clientTop + port.clientHeight);
+      if (rect && (rect.top < top || rect.bottom > bottom)) {
+        port.scrollTop += rect.top - top - (bottom - top) / 3;
+        rect = range.getClientRects()[0];
       }
-      if (node === source.root) break;
     }
-    if (rect && (rect.top < 60 || rect.bottom > innerHeight - 80)) scrollBy(0, rect.top - innerHeight / 3);
   }
   function markCurrentBlock(blockIndex, blockKey) {
     clearCurrentBlock();
     const entry = blockKey ? entriesByKey.get(blockKey) : blockEntries[blockIndex];
+    activeHighlightEntry = entry;
+    activeHighlightTurn = entry?.node.closest('[data-testid^="conversation-turn-"]');
     if (entry && !(isChatGPTPage() && entry.kind === 'code')) (entry.nodes || [entry.node]).forEach(node => { node.classList.add(currentClass); markedNodes.add(node); });
     const item = state.queue[state.index];
     if (entry?.kind === 'code' && item && !codeScrolling && !skippedTurns.has(entry.node.closest('[data-testid^="conversation-turn-"]'))) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
   }
   function updateTransport() {
-    els.playIcon.textContent = state.playing ? 'Ⅱ' : '▶';
-    els.playLabel.textContent = state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting ? 'Pause' : (state.index >= 0 && !state.completed ? 'Resume' : 'Play from top');
-    els.play.classList.toggle('is-playing', state.playing);
+    const label = state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting ? 'Pause' : (state.index >= 0 && !state.completed ? 'Resume' : 'Play from top');
+    pendingPanel.transport = [state.playing, label];
+    panelDirty = true;
+    schedulePanelWrite();
   }
   function releaseAudioObjectUrl() {
     if (!state.audioObjectUrl) return;
@@ -464,7 +548,7 @@
     if (codeScrolling) return;
     const duration = state.webAudioBuffer?.duration || 0;
     const part = duration ? position / duration : 0;
-    els.track.style.transform = `scaleX(${Math.min(1, (state.index + part) / Math.max(1, state.queue.length))})`;
+    setPanelProgress(Math.min(1, (state.index + part) / Math.max(1, state.queue.length)));
   }
   function pauseWebAudio() {
     state.webAudioRun++;
@@ -485,6 +569,7 @@
     state.tempoBuffer = null;
     state.tempoRate = null;
   }
+  let decodedAudio = null;
   function bytesFromDataSource(source) {
     const comma = source.indexOf(',');
     if (comma < 0 || !source.slice(0, comma).includes(';base64')) throw new Error('Sonora returned an invalid audio source.');
@@ -501,9 +586,10 @@
     await context.resume();
     if (revision !== state.revision || run !== state.webAudioRun) return false;
     if (!state.webAudioBuffer || state.webAudioSourceData !== source) {
-      const bytes = bytesFromDataSource(source);
-      const decoded = await context.decodeAudioData(bytes.buffer.slice(0));
+      const decoded = decodedAudio?.source === source ? decodedAudio.buffer
+        : await context.decodeAudioData(bytesFromDataSource(source).buffer);
       if (revision !== state.revision || run !== state.webAudioRun) return false;
+      decodedAudio = { source, buffer: decoded };
       state.webAudioBuffer = decoded;
       state.webAudioSourceData = source;
       state.tempoBuffer = null;
@@ -551,7 +637,7 @@
       return false;
     }
     clearWebAudioTimer();
-    state.webAudioTimer = setInterval(() => updateProgress(webAudioPosition()), 250);
+    state.webAudioTimer = setInterval(() => { if (!codeScrolling) updateProgress(webAudioPosition()); }, 250);
     return true;
   }
   function pausePlayback() {
@@ -704,7 +790,7 @@
     revealPassage(currentEntry(), item);
     markCurrentBlock(item.blockIndex, item.blockKey);
     updateTransport();
-    if (!codeScrolling) els.track.style.transform = 'scaleX(0)';
+    if (!codeScrolling) setPanelProgress(0);
     setStatus(`Rendering passage ${passageLabel(index)}…`, 'busy');
     try {
       const result = await render(index);
@@ -787,7 +873,7 @@
     releaseAudioObjectUrl();
     els.audio.removeAttribute('src');
     els.audio.load();
-    els.track.style.transform = 'scaleX(0)';
+    setPanelProgress(0);
     clearCurrentBlock();
     updateTransport();
     if (state.ready) {
@@ -814,7 +900,7 @@
     releaseAudioObjectUrl();
     els.audio.removeAttribute('src');
     els.audio.load();
-    els.track.style.transform = 'scaleX(0)';
+    setPanelProgress(0);
     clearCurrentBlock();
     updateTransport();
     if (state.ready) setStatus(readyMessage(), blockEntries.length ? 'ready' : 'error');
@@ -946,7 +1032,7 @@
       releaseAudioObjectUrl();
       els.audio.removeAttribute('src');
       els.audio.load();
-      els.track.style.transform = 'scaleX(0)';
+      setPanelProgress(0);
       clearCurrentBlock();
       updateTransport();
       if (state.ready) setStatus(edited ? 'This passage changed — click it to read the updated text.' : readyMessage(), 'ready');
@@ -1001,6 +1087,7 @@
     characterCount += entry.text.length;
     entryCount++;
     if (entry.kind === 'code') codeEntryCount++;
+    if (activeHighlightEntry?.key === entry.key && activeHighlightEntry.node !== entry.node) markCurrentBlock(entry.index, entry.key);
   }
   function ensureOrderedEntries() {
     if (!orderedEntriesDirty) return;
@@ -1012,7 +1099,8 @@
   function updateMeta() {
     if (!codeEntryCount) { codeMarks.forEach(boxes => boxes.forEach(box => box.remove())); codeMarks.clear(); }
     const size = characterCount + Math.max(0, entryCount - 1) * 2;
-    els.meta.textContent = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${isGoogleDocsPage() && size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
+    const text = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${isGoogleDocsPage() && size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
+    if (els.meta.textContent !== text) els.meta.textContent = text;
   }
 
   function refreshBlocks() {
@@ -1075,7 +1163,9 @@
     updateBlocks(nextBlocks, navigated);
   }
   function scheduleBlockRefresh(records) {
+    if (sourceUrl !== location.href) pageType = pageTypeFor(location.href);
     const mutations = records && typeof records[Symbol.iterator] === 'function';
+    if (mutations) invalidateGeometry(records);
     if (mutations && isChatGPTPage()) {
       records = window.SonoraPassages.contentMutations(records, root, source.root);
       if (!records.length && sourceUrl === location.href) return;
@@ -1084,6 +1174,7 @@
     if (mutations) {
       for (const record of records) {
         let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
+        if (record.type === 'attributes' && node?.nodeType === Node.ELEMENT_NODE) insertedRoots.set(node, ++insertionEpoch);
         while (node && source.root?.contains(node)) {
           dirtyTextNodes.add(node);
           textVersions.set(node, (textVersions.get(node) || 0) + 1);
@@ -1187,7 +1278,7 @@
           if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); resumeDiscoveredQueue(); updateMeta(); return; }
           const node = next.value;
           discoveryFrontier = node;
-          if (!window.SonoraPassages.visibleBlock(node, Boolean(visibilityStyle))) continue;
+          if (!window.SonoraPassages.visibleBlock(node, isChatGPTPage())) continue;
           seenNodes.add(node);
           if (entriesByNode.has(node) && !entriesByNode.get(node).partial && !isTextDirty(node)) continue;
           reading = { node, version: textVersions.get(node) || 0, reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
@@ -1286,12 +1377,14 @@
     docsHover?.nodes.forEach(node => node.classList.add('sonora-hover-block'));
   };
   document.addEventListener('pointermove', docsPointerListener, { capture: true, passive: true });
-  const wheelActivityListener = () => {
+  const wheelActivityListener = event => {
+    if (!relevantScroll(event)) return;
     if (!indexingDone || state.queue.length || codeHoverPoint?.block || codeMarks.size) wordPositionListener();
     if (state.queue.length) followReading = false;
   };
   document.addEventListener('wheel', wheelActivityListener, { capture: true, passive: true });
-  const wordPositionListener = () => {
+  const wordPositionListener = event => {
+    if (!relevantScroll(event)) return;
     // Scrolling is user-owned. Suspend geometry/paint until it settles; never
     // materialize an off-screen turn just to follow an inaudible visual mark.
     lastPositionChange = performance.now();
@@ -1299,6 +1392,7 @@
     if (lastPositionChange > autoScrollUntil) followReading = false;
     if (codeScrolling) return;
     codeScrolling = true;
+    delete pendingPanel.progress;
     stopWordFrames();
     if (positionFrame === null) positionFrame = requestAnimationFrame(() => {
       positionFrame = null;
@@ -1407,7 +1501,7 @@
   els.audio.addEventListener('timeupdate', () => {
     if (codeScrolling) return;
     const part = els.audio.duration ? els.audio.currentTime / els.audio.duration : 0;
-    els.track.style.transform = `scaleX(${Math.min(1, (state.index + part) / Math.max(1, state.queue.length))})`;
+    setPanelProgress(Math.min(1, (state.index + part) / Math.max(1, state.queue.length)));
   });
   els.audio.addEventListener('ended', () => {
     if (state.audioRevision === state.revision) advanceQueue(state.revision);
@@ -1446,7 +1540,7 @@
       state.pendingRender = false;
       state.completed = true;
       resetWords();
-      els.track.style.transform = 'scaleX(1)';
+      setPanelProgress(1);
       updateTransport();
       setStatus('Page section complete — click another block to jump.', 'ready');
     }
@@ -1506,6 +1600,7 @@
     resetWebAudio();
     state.audioContext?.close().catch(() => {});
     state.audioContext = null;
+    decodedAudio = null;
     releaseAudioObjectUrl();
     pageObserver.disconnect();
     setTurnContainment(false, true);
@@ -1528,6 +1623,8 @@
     if (codeHoverTimer !== null) clearTimeout(codeHoverTimer);
     if (codeScrollTimer !== null) clearTimeout(codeScrollTimer);
     if (positionFrame !== null) cancelAnimationFrame(positionFrame);
+    if (geometryFrame !== null) cancelAnimationFrame(geometryFrame);
+    if (panelWriteFrame !== null) cancelAnimationFrame(panelWriteFrame);
     clearInterval(navigationTimer);
     if (state.voiceTimer) clearTimeout(state.voiceTimer);
     knownBlocks.forEach(node => node.classList.remove(pageClass, currentClass, 'sonora-docs-passage', 'sonora-hover-block', 'sonora-code-block'));
@@ -1559,12 +1656,13 @@
     return text;
   }
 
-  function isGoogleDocsPage() {
-    return /(^|\.)docs\.google\.com$/i.test(location.hostname) && /^\/document\//.test(location.pathname);
+  function pageTypeFor(url) {
+    const parsed = new URL(url);
+    return { docs: /(^|\.)docs\.google\.com$/i.test(parsed.hostname) && /^\/document\//.test(parsed.pathname),
+      chat: /^(chatgpt\.com|chat\.openai\.com)$/i.test(parsed.hostname) };
   }
-  function isChatGPTPage() {
-    return /^(chatgpt\.com|chat\.openai\.com)$/i.test(location.hostname);
-  }
+  function isGoogleDocsPage() { return pageType.docs; }
+  function isChatGPTPage() { return pageType.chat; }
 
   function googleDocsSurface(root) {
     return window.SonoraDocs.surfaceFor(root);
@@ -1603,7 +1701,7 @@
       return surface ? [...surface.querySelectorAll('svg g[role="paragraph"]')].filter(node => node.querySelector('rect[aria-label]')) : [];
     }
     return [...window.SonoraPassages.blockCandidates(root, noiseSelector)].filter(node => {
-      if (!window.SonoraPassages.visibleBlock(node, Boolean(visibilityStyle))) return false;
+      if (!window.SonoraPassages.visibleBlock(node, isChatGPTPage())) return false;
       const value = readableText(node);
       return value.length > (node.matches('pre,td,th,[role="cell"],[role="gridcell"]') ? 0 : 1);
     });

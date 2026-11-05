@@ -5,7 +5,7 @@ const path = require('node:path');
 const { browser, longChatHtml } = require('./helpers/browser');
 const { heavyChatHtml } = require('./helpers/chatgpt');
 
-async function install(page, waitForIndex = true) {
+async function install(page, waitForIndex = true, containment = null) {
   await page.evaluate(`(() => {
     const attach = Element.prototype.attachShadow;
     Element.prototype.attachShadow = function (options) { const shadow = attach.call(this, options); if (this.id === 'sonora-overlay-root') window.panel = shadow; return shadow; };
@@ -23,7 +23,9 @@ async function install(page, waitForIndex = true) {
     }};
   })()`);
   for (const file of ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js']) {
-    await page.evaluate(fs.readFileSync(path.join(__dirname, '../extension', file), 'utf8'));
+    let script = fs.readFileSync(path.join(__dirname, '../extension', file), 'utf8');
+    if (file === 'overlay.js' && containment) script = script.replace(/const CHATGPT_CONTAINMENT = '[^']+';/, `const CHATGPT_CONTAINMENT = '${containment}';`);
+    await page.evaluate(script);
     if (file === 'words.js')
       await page.evaluate(`(() => {
       const create = SonoraWords.createTracker;
@@ -93,7 +95,7 @@ test('unscoped readable text still refreshes while unrelated UI is ignored', asy
 test('ChatGPT turn containment is a removable stylesheet and does not mark every passage', async (t) => {
   const page = await browser(t, longChatHtml(500));
   if (!page) return;
-  await install(page);
+  await install(page, true, 'turn');
   const active = await page.evaluate(`(() => {
     const turn = document.querySelector('article');
     return {visibility: getComputedStyle(turn).contentVisibility, intrinsic: getComputedStyle(turn).containIntrinsicSize,
@@ -149,7 +151,7 @@ test('turn containment preserves the viewport anchor, native find and distant co
     mobile: false
   });
   const anchor = await page.evaluate(`(async () => {
-    scrollTo(0, document.documentElement.scrollHeight / 2);
+    const scroller = document.querySelector('#chat-scroll'); scroller.scrollTop = scroller.scrollHeight / 2;
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const turn = document.elementFromPoint(550, 400).closest('article');
     window.anchorTurn = turn;
@@ -277,7 +279,7 @@ test('scrolling freezes visual progress updates while playback continues, then c
   assert.equal(await page.evaluate(`panel.querySelector('.track i').style.transform === progressBeforeScroll`), true);
   assert.match(await page.evaluate(`panel.querySelector('.status span').textContent`), /^Playing/);
   await settle(page);
-  await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('timeupdate'))`);
+  await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('timeupdate')); new Promise(resolve => requestAnimationFrame(resolve))`);
   assert.equal(await page.evaluate(`panel.querySelector('.track i').style.transform === progressBeforeScroll`), false);
   assert.match(await page.evaluate(`panel.querySelector('.status span').textContent`), /^Playing/);
   assert.deepEqual(page.errors, []);

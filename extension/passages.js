@@ -212,9 +212,10 @@
 
   // Filter before invalidating extraction/range caches. ChatGPT changes its UI
   // on every hover; those records do not alter the narration source.
-  const chromeSelector = 'script,style,noscript,template,button,input,textarea,select,nav,aside,header,footer,form,time,[role="button"],[role="toolbar"],[role="tooltip"],[role="navigation"],[role="status"],[role="menu"],.sr-only,.visually-hidden';
+  const chromeSelector = 'script,style,noscript,template,button,input,textarea,select,nav,aside,header,footer,form,[role="button"],[role="toolbar"],[role="tooltip"],[role="navigation"],[role="menu"],.sr-only,.visually-hidden';
   function contentMutations(records, overlayRoot, readableRoot) {
-    const announcement = node => node.hasAttribute?.('aria-live')
+    const announcement = node => node.matches?.('[aria-live],[role="status"],time')
+      && !node.closest('[data-message-id],[data-message-author-role],.markdown,.prose,pre,code')
       && !node.matches(blockSelector + ',[data-message-id],[data-testid^="conversation-turn-"],.markdown,.prose')
       && !node.querySelector(blockSelector + ',[data-message-id],[data-testid^="conversation-turn-"],.markdown,.prose');
     const meaningful = node => {
@@ -238,7 +239,7 @@
       if (readableRoot?.isConnected && !readableRoot.contains(target)) return false;
       if (!readableRoot?.isConnected) return true; // The readable root was replaced.
       if (target.closest?.(chromeSelector)) return false;
-      const live = target.closest?.('[aria-live]');
+      const live = target.closest?.('[aria-live],[role="status"],time');
       if (live && announcement(live)) return false;
       // Code headers and copy controls are siblings of the actual code text.
       const pre = target.closest?.('pre'), code = pre?.querySelector('code');

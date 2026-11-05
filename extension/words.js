@@ -351,7 +351,6 @@
         if (x) { clip.left = Math.max(clip.left, rect.left); clip.right = Math.min(clip.right, rect.right); }
         if (y) { clip.top = Math.max(clip.top, rect.top); clip.bottom = Math.min(clip.bottom, rect.bottom); }
       }
-      if (node.matches('pre')) break;
     }
     return clip;
   }

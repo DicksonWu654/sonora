@@ -26,7 +26,7 @@ async function browser(t, html, url = 'https://chatgpt.com/c/synthetic') {
   t.after(async () => {
     child.kill();
     if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
-    fs.rmSync(profile, { recursive: true, force: true });
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
   const portFile = path.join(profile, 'DevToolsActivePort');
   let port;
