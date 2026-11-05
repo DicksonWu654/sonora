@@ -92,4 +92,16 @@ function longChatHtml(count = 500) {
     </div></article>`).join('')}</div></main>`;
 }
 
-module.exports = { browser, longChatHtml };
+async function waitFor(page, expression, timeout = 10000) {
+  await page.evaluate(`new Promise((resolve, reject) => {
+    const started = performance.now();
+    function check() {
+      if (${expression}) { resolve(); return; }
+      if (performance.now() - started > ${timeout}) { reject(new Error(${JSON.stringify('Timed out waiting for: ' + expression)})); return; }
+      requestAnimationFrame(check);
+    }
+    check();
+  })`);
+}
+
+module.exports = { browser, longChatHtml, waitFor };

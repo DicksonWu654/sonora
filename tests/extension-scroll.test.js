@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { browser, longChatHtml } = require('./helpers/browser');
+const { browser, longChatHtml, waitFor } = require('./helpers/browser');
 const { heavyChatHtml } = require('./helpers/chatgpt');
 
 async function install(page, waitForIndex = true, containment = null) {
@@ -266,6 +266,7 @@ test('scrolling freezes visual progress updates while playback continues, then c
   if (!page) return;
   await install(page);
   await page.evaluate(`document.querySelector('p').click()`);
+  await waitFor(page, `panel.querySelector('.status span').textContent.startsWith('Playing')`);
   await page.evaluate(`(() => {
     const audio = panel.querySelector('audio');
     Object.defineProperty(audio, 'duration', {value: 4});

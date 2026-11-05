@@ -37,9 +37,10 @@ test('supervisor starts on demand, proxies requests, and preserves active book j
   let jobs = [];
   let starts = 0;
   let kills = 0;
+  let jobChecks = 0;
   const backendServer = http.createServer((req, res) => {
     if (req.url === '/api/narration/status') return json(res, 200, { ready: true, state: 'ready' });
-    if (req.url === '/api/books') return json(res, 200, { jobs });
+    if (req.url === '/api/books') { jobChecks++; return json(res, 200, { jobs }); }
     if (req.url === '/echo') {
       let body = '';
       req.setEncoding('utf8');
@@ -79,12 +80,14 @@ test('supervisor starts on demand, proxies requests, and preserves active book j
   assert.equal(starts, 1);
 
   jobs = [{ state: 'rendering' }];
-  await new Promise(resolve => setTimeout(resolve, 100));
+  // The first idle check is scheduled at least 1 s later. A second job query
+  // proves the first check completed and kept the active conversion alive.
+  await waitFor(() => jobChecks > 1, 10000);
   assert.equal(kills, 0, 'active conversions must keep the backend alive');
   assert.equal(supervisor.state().backendRunning, true);
 
   jobs = [];
-  await waitFor(() => kills === 1);
+  await waitFor(() => kills === 1, 10000);
   assert.equal(supervisor.state().backendRunning, false);
   assert.equal(starts, 1);
   await supervisor.close();

@@ -2,6 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { compactMap, compactSpan, chunkOffsets, wordAt, domRange, createRangeResolver, docsRects, createTracker } = require('../extension/words');
 
+// These synchronous unit tests inspect completed ranges, not host scheduling.
+// Exercise the resolver's frame budget explicitly with a controlled clock below.
+test.beforeEach(t => t.mock.method(performance, 'now', () => 0));
+
 test('word offsets map normalized ligatures, combining accents and emoji back to original UTF-16', () => {
   const map = compactMap('  oﬃce\u200b cafe\u0301 😀  ');
   assert.equal(map.text, 'officecafé😀');
@@ -215,13 +219,41 @@ test('tracked DOM revisions avoid rescanning text nodes on every animation frame
   for (let frame = 0; frame < 120; frame++) tracker.update(entry, .2, null);
   assert.equal(reads, preparedReads);
   const resolve = createRangeResolver(document);
-  resolve(entry, 5, 4);
+  assert(resolve(entry, 5, 4));
   const indexedReads = reads;
   for (let move = 0; move < 120; move++) resolve(entry, 5, 4);
   assert.equal(reads, indexedReads);
   raw = 'Read  this'; entry.domRevision++;
   tracker.update(entry, .3, null);
   assert.equal([...highlights.get('sonora-current-word')][0].startOffset, 6);
+});
+
+test('a range deferred by its frame budget resumes once and keeps its revision cache across elapsed time', t => {
+  const { document, makeNode } = domTrackerFixture();
+  const node = makeNode('Read this');
+  let now = 0, reads = 0, preempt = true;
+  t.mock.method(performance, 'now', () => {
+    const value = now;
+    if (preempt) { now += 3; preempt = false; }
+    return value;
+  });
+  Object.defineProperty(node.textNodes[0], 'data', { get() { reads++; return 'Read this'; } });
+  const entry = { node, text: 'Read this', domRevision: 1 };
+  const resolve = createRangeResolver(document);
+  assert.equal(resolve(entry, 5, 4), null);
+  assert.equal(resolve.pending, true);
+  assert.equal(reads, 0, 'the first call yielded before reading any text');
+
+  const range = resolve(entry, 5, 4);
+  assert.equal(range.startOffset, 5);
+  assert.equal(range.endOffset, 9);
+  assert.equal(resolve.pending, false);
+  assert.equal(reads, 1);
+  for (let move = 0; move < 120; move++) {
+    now += 60000;
+    assert(resolve(entry, 5, 4));
+  }
+  assert.equal(reads, 1, 'elapsed time must not expire an unchanged revision');
 });
 
 test('a highlight in a 20,000-line node indexes only the text needed by that word', () => {

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { browser, longChatHtml } = require('./helpers/browser');
+const { browser, longChatHtml, waitFor } = require('./helpers/browser');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function install(page) {
@@ -90,17 +90,21 @@ test('clicking trailing code whitespace starts its visual line', async t => {
   await install(page);
   const bounds = await page.evaluate(`(() => { const r = document.querySelector('code').getBoundingClientRect(); return {x: r.left, y: r.top, width: r.width}; })()`);
   for (const [line, expected, trailing] of [[0, 'alpha();', true], [1, 'beta();', true], [2, 'gamma();', true], [1, 'beta();', false]]) {
+    const before = await page.evaluate('messages.length');
     const point = { x: bounds.x + (trailing ? Math.min(200, bounds.width - 20) : 2), y: bounds.y + line * 24 + 12 };
     await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', button: 'left', clickCount: 1, ...point});
     await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', button: 'left', clickCount: 1, ...point});
+    await waitFor(page, `messages.slice(${before}).some(message => message.type === 'sonora-render')`);
     assert.equal(await page.evaluate(lastRender), expected);
     await page.evaluate(`panel.querySelector('.stop').click()`);
   }
   await page.evaluate(`document.querySelector('code').textContent = 'alpha();   \\n    beta();\\n  gamma();'`);
   await delay(220);
+  const before = await page.evaluate('messages.length');
   const indentation = { x: bounds.x + 2, y: bounds.y + 24 + 12 };
   await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', button: 'left', clickCount: 1, ...indentation});
   await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', button: 'left', clickCount: 1, ...indentation});
+  await waitFor(page, `messages.slice(${before}).some(message => message.type === 'sonora-render')`);
   assert.equal(await page.evaluate(lastRender), 'beta();');
   assert.deepEqual(page.errors, []);
 });

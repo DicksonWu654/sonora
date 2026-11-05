@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { browser, longChatHtml } = require('./helpers/browser');
+const { browser, longChatHtml, waitFor } = require('./helpers/browser');
 
 async function install(page, holdFrames = false) {
   await page.evaluate(`(() => {
@@ -179,9 +179,11 @@ test('pausing while waiting for discovery prevents automatic resume and resumes 
   if (!page) return;
   await install(page);
   await page.evaluate(`autoPlayback = true; document.querySelector('p').click()`);
+  await waitFor(page, `panel.querySelector('.status span').textContent.includes('Finding the next')`);
   assert.match(await page.evaluate(`panel.querySelector('.status span').textContent`), /Finding the next/);
   assert.equal(await page.evaluate('indexed'), false);
   await page.evaluate(`panel.querySelector('.play').click(); startIndex(); window.__sonoraOverlay.whenIndexed`);
+  await waitFor(page, `panel.querySelector('.status span').textContent === 'Paused'`);
   assert.equal(await page.evaluate(`panel.querySelector('.status span').textContent`), 'Paused');
   assert.deepEqual(await page.evaluate('spoken'), ['First passage.']);
   await page.evaluate(`panel.querySelector('.play').click()`);
