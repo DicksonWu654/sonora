@@ -18,6 +18,9 @@ function background({ top, children = [], granted = true }) {
       action: {onClicked: {addListener(fn) {action = fn;}}},
       storage: {local: {get: async () => ({})}},
       permissions: {contains: async () => granted},
+      webNavigation: {getAllFrames: async () => [{frameId: 0, parentFrameId: -1, url: 'https://parent.test/page'},
+        ...(top.frames || []).map((frame, index) => ({frameId: children.find(item => item.result.path.join('/') === frame.path.join('/'))?.frameId || index + 1,
+          parentFrameId: 0, url: frame.url}))]},
       tabs: {create: async options => {opened.push(options);}, get: async id => ({id, url: 'https://parent.test/page'})},
       scripting: {removeCSS: async () => {}, insertCSS: async () => {}, async executeScript(options) {
         if (options.func?.name === 'probeFrame') {
@@ -56,8 +59,8 @@ test('a readable top frame skips all subframe probes and permission work', async
 });
 
 test('hidden frames are excluded and a visible nested document can be selected', async () => {
-  const top = {path: [], readable: false, score: 0, frames: [embed(0, 90000)]};
-  const bridge = background({top, children: [frame(8, 1), {frameId: 7, result: {path: [0], readable: false, score: 0, frames: [{path: [0, 0], area: 80000, url: 'https://embed.test/nested'}]}}, {frameId: 9, result: {path: [0, 0], readable: true, score: 1000, frames: []}}]});
+  const top = {path: [], readable: false, score: 0, frames: [embed(0, 500000)]};
+  const bridge = background({top, children: [frame(8, 1), {frameId: 7, result: {path: [0], readable: false, score: 0, frames: [{path: [0, 0], area: 400000, url: 'https://embed.test/nested'}]}}, {frameId: 9, result: {path: [0, 0], readable: true, score: 1000, frames: []}}]});
   await bridge.action();
   assert.equal(bridge.scripts[0].frameIds?.[0], 9);
 });

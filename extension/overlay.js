@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.13';
+  const OVERLAY_VERSION = '0.4.14';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -13,6 +13,8 @@
   // Start the local voice before any synchronous page discovery.
   const pdfSource = window.__sonoraPdfUrl;
   delete window.__sonoraPdfUrl;
+  let frameChoice = window.__sonoraFrameChoice || null;
+  delete window.__sonoraFrameChoice;
   let frameNotice = window.__sonoraFrameNotice || (pdfSource ? 'PDF text is available in Sonora’s reader. Save this PDF, then choose it with Import file.' : '');
   delete window.__sonoraFrameNotice;
   let initialStatus = message({ type: 'sonora-status' });
@@ -258,7 +260,7 @@
       .track { height: 3px; margin: 12px 0 0; overflow: hidden; border-radius: 2px; background: #354239; }
       .track i { display: block; width: 100%; height: 100%; background: #d8b28b; transform: scaleX(0); transform-origin: left; transition: transform .15s; }
       .hint { margin: 9px 0 0; color: #718076; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .pdf-reader { margin: 12px 18px; padding: 10px; border: 0; border-radius: 5px; background: #d8b28b; color: #292018; cursor: pointer; }
+      .pdf-reader, .frame-switch { margin: 12px 18px; padding: 10px; border: 0; border-radius: 5px; background: #d8b28b; color: #292018; cursor: pointer; }
       @keyframes sonar-blink { 50% { opacity: .35; } }
       @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
     </style>
@@ -269,6 +271,7 @@
       <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label><span class="speed-caption">Speed <output class="speed-value" for="sonora-speed">1×</output></span><input id="sonora-speed" class="speed" aria-label="Speed" type="range" min="1" max="3" step="0.1" value="1"></label></section>
       <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
       <button class="pdf-reader" type="button" hidden>Open PDF in reader</button>
+      <button class="frame-switch" type="button" hidden>Read embedded document</button>
       <footer class="bottom"><div class="transport"><button class="stop" type="button">Stop</button><button class="play" type="button"><span class="play-icon">▶</span> <span class="play-label">Play from top</span></button></div><div class="track" aria-hidden="true"><i></i></div><p class="hint">Your page stays in place while Sonora reads.</p></footer>
       <audio preload="auto"></audio>
     </aside>`;
@@ -326,6 +329,18 @@
     status: 'Checking the local voice…'
   };
   let savedPositions = [], resumeRecord = null, resumeEntry = null, mediaBound = false;
+  const frameSwitch = shadow.querySelector('.frame-switch');
+  function setFrameChoice(choice) {
+    frameChoice = choice;
+    frameSwitch.hidden = !choice?.embedded && !choice?.back;
+    frameSwitch.textContent = choice?.back ? 'Read top page' : 'Read embedded document';
+  }
+  setFrameChoice(frameChoice);
+  frameSwitch.addEventListener('click', () => {
+    frameSwitch.disabled = true;
+    message({type: 'sonora-switch-document', document: frameChoice?.back ? 'top' : 'embedded'})
+      .catch(error => setStatus(error.message, 'error')).finally(() => { frameSwitch.disabled = false; });
+  });
   if (pdfSource) {
     const button = shadow.querySelector('.pdf-reader'); button.hidden = false;
     shadow.querySelector('.selection-title').textContent = 'Read this PDF in Sonora';
@@ -917,6 +932,11 @@
     return true;
   }
   const renderReadyListener = (payload, sender, respond) => {
+    if (payload?.type === 'sonora-dispose-reader' && !state.closed) {
+      els.close.click();
+      respond?.({ok: true});
+      return false;
+    }
     if (payload?.type === 'sonora-pause-playback' && !state.closed) {
       ownsPlayback = false;
       state.revision++;
@@ -1886,6 +1906,8 @@
     whenIndexed,
     whenContained,
     toggle: togglePanel,
+    show: () => els.panel.classList.remove('is-hidden'),
+    setFrameChoice,
     setFrameNotice(notice) {
       frameNotice = notice;
       if (notice) els.panel.classList.remove('is-hidden');

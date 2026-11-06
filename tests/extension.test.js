@@ -21,6 +21,7 @@ test('the unpacked extension has a complete Manifest V3 package', () => {
   assert(manifest.host_permissions.includes('http://localhost/*'));
   assert(manifest.host_permissions.includes('https://docs.google.com/*'));
   assert.deepEqual(manifest.optional_host_permissions, ['<all_urls>']);
+  assert(manifest.permissions.includes('webNavigation'));
   assert(!manifest.host_permissions.includes('<all_urls>'));
   assert.deepEqual(manifest.content_scripts, [{
     matches: ['https://docs.google.com/document/*'],

@@ -6,6 +6,11 @@ const validation = globalThis.SonoraValidation;
 const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
 let menuTask = Promise.resolve();
 const renderControllers = new Map();
+const readerPorts = new Map(), tabReaders = new Map(), tabTasks = new Map();
+let readerWrites = Promise.resolve();
+const readersLoaded = chrome.storage.session?.get('sonoraReaders').then(saved => {
+  for (const [tabId, reader] of Object.entries(saved.sonoraReaders || {})) tabReaders.set(Number(tabId), reader);
+}).catch(() => {}) || Promise.resolve();
 let playbackOwner = null;
 let positionWrites = Promise.resolve();
 function validPosition(record) {
@@ -23,9 +28,18 @@ function cancelDocument(prefix) {
   }
 }
 chrome.runtime.onConnect?.addListener(port => {
-  if (port.name === 'sonora-reader') port.onDisconnect.addListener(() => cancelDocument(documentKey(port.sender)));
+  if (port.name !== 'sonora-reader') return;
+  const key = documentKey(port.sender);
+  readerPorts.set(key, {port, sender: port.sender});
+  port.onDisconnect.addListener(() => {
+    if (readerPorts.get(key)?.port === port) readerPorts.delete(key);
+    cancelDocument(key);
+  });
 });
-chrome.tabs?.onRemoved?.addListener(tabId => cancelDocument(`${tabId}:`));
+chrome.tabs?.onRemoved?.addListener(tabId => {
+  cancelDocument(`${tabId}:`);
+  readersLoaded.then(() => { tabReaders.delete(tabId); saveReaders(); });
+});
 chrome.tabs?.onUpdated?.addListener((tabId, info) => { if (info.status === 'loading') cancelDocument(`${tabId}:`); });
 const FETCH_TIMEOUT_MS = 30000;
 const RENDER_TIMEOUT_MS = 120000;
@@ -68,7 +82,7 @@ chrome.runtime.onStartup.addListener(createMenu);
 // Also repair the menu when a developer reloads an unpacked extension.
 createMenu();
 
-async function injectReader(tabId, frameId = 0, notice = '') {
+async function injectReader(tabId, frameId = 0, notice = '', choice = null, toggle = true) {
   const target = { tabId, frameIds: [frameId] };
   let lastError;
   let cssInjected = false;
@@ -77,13 +91,16 @@ async function injectReader(tabId, frameId = 0, notice = '') {
     try {
       if (!readerInjected) {
         const version = chrome.runtime.getManifest().version;
-        const results = await chrome.scripting.executeScript({ target, func: (version, notice) => {
+        const results = await chrome.scripting.executeScript({ target, func: (version, notice, choice, toggle) => {
           window.__sonoraFrameNotice = notice;
+          window.__sonoraFrameChoice = choice;
           if (window.__sonoraOverlay?.version !== version) return false;
           window.__sonoraOverlay.setFrameNotice?.(notice);
-          if (!notice) window.__sonoraOverlay.toggle();
+          window.__sonoraOverlay.setFrameChoice?.(choice);
+          if (!notice && toggle) window.__sonoraOverlay.toggle();
+          else window.__sonoraOverlay.show?.();
           return true;
-        }, args: [version, notice] });
+        }, args: [version, notice, choice, toggle] });
         if (results?.[0]?.result) return;
         await chrome.scripting.executeScript({ target, files: ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'speech.js', 'words.js', 'overlay.js'] });
         readerInjected = true;
@@ -107,53 +124,100 @@ async function injectReader(tabId, frameId = 0, notice = '') {
   throw lastError;
 }
 
-async function injectSafely(tab) {
-  if (!tab || typeof tab.id !== 'number') return;
-  // Do not wait for injection or page indexing to begin loading the voice.
-  prewarmVoice();
+function saveReaders() {
+  readerWrites = readerWrites.catch(() => {}).then(() => chrome.storage.session?.set({sonoraReaders: Object.fromEntries(tabReaders)})).catch(() => {});
+}
+function inTab(tabId, task) {
+  const next = (tabTasks.get(tabId) || Promise.resolve()).catch(() => {}).then(task);
+  tabTasks.set(tabId, next);
+  const finished = () => { if (tabTasks.get(tabId) === next) tabTasks.delete(tabId); };
+  next.then(finished, finished);
+  return next;
+}
+function sameReader(a, b) {
+  return a?.tab?.id === b?.tab?.id && (a.documentId && b.documentId ? a.documentId === b.documentId : a.frameId === b.frameId);
+}
+async function disposeReader(reader) {
+  const target = reader.documentId ? {documentId: reader.documentId} : {frameId: reader.frameId || 0};
   try {
-    const frames = globalThis.SonoraFrames;
-    const top = (await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: frames.probeFrame }))?.[0]?.result;
-    if (top?.pdf) {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: url => { window.__sonoraPdfUrl = url; }, args: [top.url || tab.url] });
-      return await injectReader(tab.id);
-    }
-    if (top?.readable || !top?.frames?.length) return await injectReader(tab.id);
-    // Chrome returns results for frames we can access, omitting inaccessible
-    // cross-origin documents. Probe them only when the top frame lacks content.
-    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: frames.probeFrame });
-    for (const candidate of frames.candidates(top, results)) {
-      if (candidate.data?.readable || candidate.data?.score > 1 && !candidate.data.frames?.length) {
-        // A previous denied-access panel belongs to the shell, not this reader.
-        await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: () => {
-          window.__sonoraOverlay?.dispose?.();
-        } });
-        return await injectReader(tab.id, candidate.frameId);
-      }
-      if (candidate.data) continue;
-      const origin = frames.originPattern(candidate.url);
-      if (origin && !await chrome.permissions.contains({ origins: [origin] })) {
-        const url = new URL(chrome.runtime.getURL('frame-permission.html'));
-        url.search = new URLSearchParams({ tab: tab.id, url: tab.url || top.url, origin }).toString();
-        await injectReader(tab.id, 0, `Embedded text needs access to ${new URL(origin).hostname}. Allow access in the Sonora tab to read it.`);
-        const existing = (await chrome.tabs.query?.({ url: chrome.runtime.getURL('frame-permission.html') + '*' }))?.find(item => item.url === url.href);
-        if (existing) await chrome.tabs.update(existing.id, { active: true });
-        else await chrome.tabs.create({ url: url.href });
-        return;
-      }
-    }
-    await injectReader(tab.id, 0, 'Sonora could not access readable text in the embedded document. Its sandbox or site restrictions may block access; try opening the document in its own tab.');
-  } catch (error) {
-    console.warn('Sonora could not open on this page:', error.message);
+    const response = await chrome.tabs.sendMessage(reader.tab.id, {type: 'sonora-dispose-reader'}, target);
+    if (!response?.ok) throw new Error('Older reader');
+  } catch {
+    // Also retire a reader injected by an earlier extension version.
+    try {
+      await chrome.scripting.executeScript({target: {tabId: reader.tab.id,
+        ...(reader.documentId ? {documentIds: [reader.documentId]} : {frameIds: [reader.frameId || 0]})},
+        func: () => { window.__sonoraOverlay?.dispose?.(); }});
+    } catch { /* A departed or restricted document has no reachable reader. */ }
   }
+  cancelDocument(documentKey(reader));
+}
+async function activateReader(tab, frame, notice = '', choice = null, toggle = true) {
+  await Promise.all([readersLoaded, ownerLoaded]);
+  const next = {tab: {id: tab.id}, frameId: frame.frameId || 0, documentId: frame.documentId};
+  const previous = new Map();
+  for (const reader of [tabReaders.get(tab.id), ...[...readerPorts.values()].map(item => item.sender), playbackOwner]) {
+    if (reader?.tab?.id === tab.id && !sameReader(reader, next)) previous.set(documentKey(reader), reader);
+  }
+  // Disposal, including audio and pending synthesis, finishes before injection.
+  for (const reader of previous.values()) await disposeReader(reader);
+  tabReaders.set(tab.id, next); saveReaders();
+  await injectReader(tab.id, next.frameId, notice, choice, toggle);
+}
+async function openDocument(tab, selection = 'default') {
+  const frames = globalThis.SonoraFrames;
+  const topResult = (await chrome.scripting.executeScript({target: {tabId: tab.id, frameIds: [0]}, func: frames.probeFrame}))?.[0];
+  const top = topResult?.result;
+  const large = frames.candidates(top, []).filter(frame => frames.largeFrame(frame, top));
+  const choice = large.length ? {embedded: true} : null;
+  const toggle = selection === 'default';
+  if (top?.pdf) {
+    await chrome.scripting.executeScript({target: {tabId: tab.id, frameIds: [0]}, func: url => { window.__sonoraPdfUrl = url; }, args: [top.url || tab.url]});
+    return activateReader(tab, topResult, '', null, toggle);
+  }
+  // A short or exhausted sample is not evidence of an empty document. Show
+  // controls immediately; inspect children only after an explicit switch.
+  if (selection !== 'embedded' && (selection === 'top' || frames.hasText(top) || top?.sample === 'inconclusive' || !large.length)) {
+    return activateReader(tab, topResult || {frameId: 0}, '', choice, toggle);
+  }
+  const [probed, navigation] = await Promise.allSettled([
+    chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, func: frames.probeFrame}),
+    chrome.webNavigation?.getAllFrames({tabId: tab.id}) || Promise.resolve([])
+  ]);
+  const results = probed.status === 'fulfilled' ? probed.value : [topResult];
+  const loaded = navigation.status === 'fulfilled' ? navigation.value || [] : [];
+  const candidates = frames.candidates(top, results, loaded).filter(frame => frames.largeFrame(frame, top));
+  const readable = candidates.find(frame => frames.hasText(frame.data));
+  if (readable) return activateReader(tab, readable, '', {back: true}, toggle);
+  for (const candidate of candidates) {
+    if (candidate.data) continue;
+    // Only loaded document URLs from a probe or browser navigation metadata
+    // can authorize a host request. iframe.src is deliberately never used.
+    const origin = frames.originPattern(candidate.url);
+    if (!origin || await chrome.permissions.contains({origins: [origin]})) continue;
+    const url = new URL(chrome.runtime.getURL('frame-permission.html'));
+    url.search = new URLSearchParams({tab: tab.id, url: tab.url || top.url, origin}).toString();
+    const site = origin === 'https://*.frame.claudeusercontent.com/*' ? 'all Claude artifacts' : new URL(origin).hostname;
+    await activateReader(tab, topResult, `Embedded text needs access to ${site}. Allow access in the Sonora tab to read it.`, choice, false);
+    const existing = (await chrome.tabs.query?.({url: chrome.runtime.getURL('frame-permission.html') + '*'}))?.find(item => item.url === url.href);
+    if (existing) await chrome.tabs.update(existing.id, {active: true});
+    else await chrome.tabs.create({url: url.href});
+    return;
+  }
+  await activateReader(tab, topResult, 'Sonora could not access readable text in the embedded document. Its sandbox or site restrictions may block access; try opening the document in its own tab.', choice, false);
+}
+function injectSafely(tab, selection = 'default') {
+  if (!tab || typeof tab.id !== 'number') return Promise.resolve();
+  prewarmVoice();
+  return inTab(tab.id, () => openDocument(tab, selection)).catch(error => {
+    console.warn('Sonora could not open on this page:', error.message);
+  });
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId !== MENU_ID || !info.selectionText?.trim()) return;
-  injectSafely(tab);
+  if (info.menuItemId === MENU_ID && info.selectionText?.trim()) injectSafely(tab);
 });
-
-chrome.action.onClicked.addListener(injectSafely);
+chrome.action.onClicked.addListener(tab => injectSafely(tab));
 
 async function serverUrl() {
   try {
@@ -201,6 +265,12 @@ async function pageAudioSource(base, data, signal) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender?.id && chrome.runtime.id && sender.id !== chrome.runtime.id) return false;
+  if (message?.type === 'sonora-switch-document' && sender.tab) {
+    const selection = message.document === 'top' ? 'top' : 'embedded';
+    chrome.tabs.get(sender.tab.id).then(tab => injectSafely(tab, selection))
+      .then(() => sendResponse({ok: true})).catch(error => sendResponse({ok: false, error: error.message}));
+    return true;
+  }
   if (message?.type === 'sonora-save-position') {
     if (message.record ? !validPosition(message.record) : typeof message.document !== 'string' || message.document.length > 4096) {
       sendResponse({ ok: false, error: 'Invalid reading position.' }); return false;
@@ -220,13 +290,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'sonora-claim-playback') {
     ownerLoaded.then(async () => {
+      await readersLoaded;
+      const selected = tabReaders.get(sender.tab?.id);
+      if (selected && !sameReader(selected, sender)) {
+        await disposeReader(sender);
+        sendResponse({ok: true, data: {owned: false}});
+        return;
+      }
       const previous = playbackOwner;
       const owner = { tab: sender.tab ? { id: sender.tab.id } : undefined, documentId: sender.documentId, frameId: sender.frameId };
       playbackOwner = owner;
       chrome.storage.session?.set({ sonoraPlaybackOwner: owner }).catch(() => {});
       if (previous?.tab?.id !== undefined && documentKey(previous) !== documentKey(owner)) {
         const target = previous.documentId ? { documentId: previous.documentId } : { frameId: previous.frameId || 0 };
-        try { await chrome.tabs.sendMessage(previous.tab.id, { type: 'sonora-pause-playback' }, target); } catch { /* A closed document has no playback left to pause. */ }
+        if (previous.tab.id === owner.tab?.id) await disposeReader(previous);
+        else try { await chrome.tabs.sendMessage(previous.tab.id, { type: 'sonora-pause-playback' }, target); } catch { /* A closed document has no playback left to pause. */ }
       }
       sendResponse({ ok: true, data: { owned: playbackOwner === owner } });
     }).catch(error => sendResponse({ ok: false, error: error.message }));
@@ -243,8 +321,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (tab.url !== url.searchParams.get('url')) throw new Error('The page changed. Click Sonora again on the page you want to read.');
       const origin = globalThis.SonoraFrames.originPattern(url.searchParams.get('origin'));
       if (!origin) throw new Error('Invalid embedded site.');
-      if (message.granted && await chrome.permissions.contains({ origins: [origin] })) await injectSafely(tab);
-      else await injectReader(tab.id, 0, `Frame permission was denied for ${new URL(origin).hostname}. Embedded text cannot be read until you allow access. Click Sonora to try again.`);
+      if (message.granted && await chrome.permissions.contains({ origins: [origin] })) await injectSafely(tab, 'embedded');
+      else await inTab(tab.id, () => activateReader(tab, {frameId: 0}, `Frame permission was denied for ${origin === 'https://*.frame.claudeusercontent.com/*' ? 'all Claude artifacts' : new URL(origin).hostname}. Embedded text cannot be read until you allow access. Click Sonora to try again.`, {embedded: true}, false));
       await chrome.tabs.update?.(tab.id, { active: true });
       sendResponse({ ok: true });
     })().catch(error => sendResponse({ ok: false, error: error.message }));

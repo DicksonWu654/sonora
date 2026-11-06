@@ -101,28 +101,39 @@ test('the one-hour idle default remains configurable', async () => {
   await supervisor.close();
 });
 
-test('idle library polling neither renews activity nor restarts a sleeping backend (audit 21)', async t => {
+test('idle library polling neither renews activity nor restarts a sleeping backend (audit 21)', {timeout: 10000}, async t => {
+  t.mock.timers.enable({apis: ['Date', 'setTimeout']});
   let starts = 0, kills = 0;
+  let stopped;
+  const idleStopped = new Promise(resolve => { stopped = resolve; });
   const backendServer = http.createServer((req, res) => json(res, 200,
     req.url.startsWith('/api/books') ? {jobs: []} : {ready: true}));
   await new Promise(resolve => backendServer.listen(0, '127.0.0.1', resolve));
   const supervisor = createSupervisor({port: 0, backendPort: backendServer.address().port, idleMs: 80,
-    spawnBackend: () => { starts++; return fakeChild(() => { kills++; }); }});
+    spawnBackend: () => { starts++; return fakeChild(() => { kills++; stopped(); }); }});
   await supervisor.listen();
   t.after(async () => {
     await supervisor.close(); backendServer.closeAllConnections();
     await new Promise(resolve => backendServer.close(resolve));
   });
   const url = `http://127.0.0.1:${supervisor.address().port}`;
-  await fetch(url + '/api/narration/status');
+  await (await fetch(url + '/api/narration/status')).json();
   const activity = supervisor.state().lastActivityAt;
-  await new Promise(resolve => setTimeout(resolve, 10));
-  await fetch(url + '/api/books?poll=1');
+  t.mock.timers.tick(10);
+  await (await fetch(url + '/api/books?poll=1')).json();
   assert.equal(supervisor.state().lastActivityAt, activity, 'passive GET must not extend the configured idle window');
-  const poller = setInterval(() => fetch(url + '/api/books').catch(() => {}), 30);
-  t.after(() => clearInterval(poller));
-  await waitFor(() => kills === 1, 5000);
-  await fetch(url + '/api/books');
+  // Complete each poll before advancing the idle clock. Overlapping network
+  // requests test active-request protection, not passive keep-warm behavior.
+  for (let at = 0; at < 3; at++) {
+    t.mock.timers.tick(10);
+    await (await fetch(url + '/api/books')).json();
+    assert.equal(supervisor.state().lastActivityAt, activity);
+  }
+  assert.equal(supervisor.state().activeRequests, 0);
+  t.mock.timers.tick(1000);
+  await idleStopped;
+  assert.equal(kills, 1);
+  await (await fetch(url + '/api/books')).json();
   assert.equal(starts, 1, 'polling a sleeping backend must not wake it');
 });
 

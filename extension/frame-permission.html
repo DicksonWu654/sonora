@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Allow Sonora to read embedded text</title>
   <link rel="stylesheet" href="reader.css">
+  <script src="frames.js" defer></script>
   <script src="frame-permission.js" defer></script>
 </head>
 <body>
@@ -13,7 +14,7 @@
     <section class="intro">
       <h1>Read the embedded document</h1>
       <p>The text on this page is hosted by <strong id="site"></strong>. Allow Sonora to read that site so clicking its text starts playback.</p>
-      <p>You only need to allow this site once. Sonora will return to your document after you choose.</p>
+      <p id="scope">You only need to allow this site once. Sonora will return to your document after you choose.</p>
     </section>
     <section class="controls">
       <p id="status" role="status" aria-live="polite">Choose whether Sonora may access the embedded text.</p>

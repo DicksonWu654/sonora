@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { browser, longChatHtml } = require('./helpers/browser');
+const { browser, longChatHtml, waitFor } = require('./helpers/browser');
 
 async function install(page, setup = null, containment = null) {
   await page.evaluate(`(() => {
@@ -151,14 +151,20 @@ test('the cached spoken entry follows a replacement conversation root', async (t
   if (!page) return;
   await install(page);
   await page.evaluate(`document.querySelector('p').click()`);
-  await settle(page);
+  await waitFor(page, `panel.querySelector('.status span').textContent.startsWith('Playing') && Boolean(panel.querySelector('.word-mark'))`);
   await page.evaluate(`(() => {
     const root = document.querySelector('[aria-label="Conversation"]');
     const replacement = root.cloneNode(true);
     replacement.style.paddingTop = '120px';
     root.replaceWith(replacement);
   })()`);
-  await settle(page);
+  await waitFor(page, `(() => {
+    const range=document.createRange();
+    range.setStart(document.querySelector('p').firstChild,0);range.setEnd(document.querySelector('p').firstChild,4);
+    const mark=panel.querySelector('.word-mark');
+    return panel.querySelector('.status span').textContent.startsWith('Playing') && mark
+      && Math.abs(range.getBoundingClientRect().top-parseFloat(mark.style.top))<2;
+  })()`);
   const position = await page.evaluate(`(() => {
     const range = document.createRange();
     range.setStart(document.querySelector('p').firstChild, 0); range.setEnd(document.querySelector('p').firstChild, 4);
