@@ -101,6 +101,51 @@ test('the one-hour idle default remains configurable', async () => {
   await supervisor.close();
 });
 
+test('idle library polling neither renews activity nor restarts a sleeping backend (audit 21)', async t => {
+  let starts = 0, kills = 0;
+  const backendServer = http.createServer((req, res) => json(res, 200,
+    req.url.startsWith('/api/books') ? {jobs: []} : {ready: true}));
+  await new Promise(resolve => backendServer.listen(0, '127.0.0.1', resolve));
+  const supervisor = createSupervisor({port: 0, backendPort: backendServer.address().port, idleMs: 80,
+    spawnBackend: () => { starts++; return fakeChild(() => { kills++; }); }});
+  await supervisor.listen();
+  t.after(async () => {
+    await supervisor.close(); backendServer.closeAllConnections();
+    await new Promise(resolve => backendServer.close(resolve));
+  });
+  const url = `http://127.0.0.1:${supervisor.address().port}`;
+  await fetch(url + '/api/narration/status');
+  const activity = supervisor.state().lastActivityAt;
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await fetch(url + '/api/books?poll=1');
+  assert.equal(supervisor.state().lastActivityAt, activity, 'passive GET must not extend the configured idle window');
+  const poller = setInterval(() => fetch(url + '/api/books').catch(() => {}), 30);
+  t.after(() => clearInterval(poller));
+  await waitFor(() => kills === 1, 5000);
+  await fetch(url + '/api/books');
+  assert.equal(starts, 1, 'polling a sleeping backend must not wake it');
+});
+
+test('real reader use renews the owner-configured 24-hour keep-warm window', async t => {
+  const previous = process.env.SONORA_IDLE_MS;
+  process.env.SONORA_IDLE_MS = String(24 * 60 * 60 * 1000);
+  t.after(() => { if (previous === undefined) delete process.env.SONORA_IDLE_MS; else process.env.SONORA_IDLE_MS = previous; });
+  const backendServer = http.createServer((req, res) => { req.resume(); json(res, 200, {ready: true, jobs: []}); });
+  await new Promise(resolve => backendServer.listen(0, '127.0.0.1', resolve));
+  const supervisor = createSupervisor({port: 0, backendPort: backendServer.address().port, spawnBackend: () => fakeChild(() => {})});
+  await supervisor.listen();
+  t.after(async () => { await supervisor.close(); backendServer.closeAllConnections(); await new Promise(resolve => backendServer.close(resolve)); });
+  const url = `http://127.0.0.1:${supervisor.address().port}`;
+  assert.equal(supervisor.state().idleMs, 86400000);
+  for (const path of ['/api/narration/render', '/api/books', '/api/books/example/retry']) {
+    const before = supervisor.state().lastActivityAt;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await fetch(url + path, {method: 'POST', body: '{}'});
+    assert(supervisor.state().lastActivityAt > before, path + ' must renew keep-warm');
+  }
+  assert.equal(supervisor.state().backendRunning, true);
+});
+
 
 test('disconnecting a reader cancels a proxied render even after its request body was sent', async t => {
   let renderStarted, renderClosed;

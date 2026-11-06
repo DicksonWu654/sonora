@@ -228,8 +228,16 @@ function createSupervisor(options = {}) {
   }
 
   async function handle(req, res) {
+    // Library progress is passive observation, including polls from idle tabs.
+    // Do not renew the owner's idle window or wake an already sleeping model.
+    const passive = req.method === 'GET' && req.url.split('?')[0] === '/api/books';
+    if (passive && (!backend || stoppingPromise)) {
+      req.resume();
+      json(res, 503, { error: 'The voice server is idle. Start listening or reload to wake it.' });
+      return;
+    }
     activeRequests++;
-    markActivity();
+    if (!passive) markActivity();
     try {
       await ensureBackend();
       await forward(req, res);
@@ -239,7 +247,8 @@ function createSupervisor(options = {}) {
       console.error(`Sonora supervisor: ${error.message}`);
     } finally {
       activeRequests--;
-      scheduleIdleCheck();
+      // Repeated progress polls must not postpone an existing idle/job check.
+      if (!passive || !idleTimer) scheduleIdleCheck();
     }
   }
 
