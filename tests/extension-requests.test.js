@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const validation = require('../extension/validation');
+const frames = require('../extension/frames');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function background(fetch, get = async () => ({})) {
@@ -12,12 +13,12 @@ function background(fetch, get = async () => ({})) {
   const chrome = {
     runtime: { id: 'sonora', getManifest: () => ({version: 'test'}), onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { receive = fn; } } },
     contextMenus: { removeAll(callback) { callback(); }, create(options, callback) { callback(); }, onClicked: { addListener() {} } },
-    scripting: { async removeCSS() { injections.push('remove-css'); }, async insertCSS() { injections.push('css'); }, async executeScript(options) { if (options.func) { injections.push(options.args ? 'probe' : 'paint'); return [{result: attached}]; } injections.push('scripts'); attached = true; } },
+    scripting: { async removeCSS() { injections.push('remove-css'); }, async insertCSS() { injections.push('css'); }, async executeScript(options) { if (options.func?.name === 'probeFrame') { injections.push('frame-probe'); return [{result: {readable: true}}]; } if (options.func) { injections.push(options.args ? 'probe' : 'paint'); return [{result: attached}]; } injections.push('scripts'); attached = true; } },
     tabs: { async sendMessage(tabId, message) { notices.push(message); } },
     action: { onClicked: { addListener(fn) { action = fn; } } }, storage: { local: { get } }
   };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../extension/background.js'), 'utf8').replace("import './validation.js';", ''), {
-    chrome, SonoraValidation: validation, fetch, AbortController, Uint8Array, btoa, console,
+  vm.runInNewContext(fs.readFileSync(require.resolve('../extension/background.js'), 'utf8').replace(/^import .*;$/gm, ''), {
+    chrome, SonoraValidation: validation, SonoraFrames: frames, fetch, AbortController, Uint8Array, btoa, console,
     setTimeout(fn) { timers.add(fn); return fn; }, clearTimeout(fn) { timers.delete(fn); }
   });
   return {
@@ -89,7 +90,7 @@ test('toolbar prewarm runs alongside injection and synthesis metadata precedes t
   });
   await bridge.action({ id: 1 });
   await tick();
-  assert.deepEqual(bridge.injections, ['probe', 'scripts', 'paint', 'remove-css', 'css'], 'show controls before applying page-wide styles');
+  assert.deepEqual(bridge.injections, ['frame-probe', 'probe', 'scripts', 'paint', 'remove-css', 'css'], 'show controls before applying page-wide styles');
   assert.equal(bridge.timers.size, 0);
   const rendered = bridge.send({ type: 'sonora-render', requestId: 'early', text: 'Read this.' });
   await tick();
@@ -104,7 +105,7 @@ test('repeated toolbar toggles reuse the overlay without injecting more scripts 
   const bridge = background(async () => ({json: async () => ({ready: true})}));
   await bridge.action({id: 1});
   await bridge.action({id: 1});
-  assert.deepEqual(bridge.injections, ['probe', 'scripts', 'paint', 'remove-css', 'css', 'probe']);
+  assert.deepEqual(bridge.injections, ['frame-probe', 'probe', 'scripts', 'paint', 'remove-css', 'css', 'frame-probe', 'probe']);
   await tick();
   assert.equal(bridge.timers.size, 0);
 });

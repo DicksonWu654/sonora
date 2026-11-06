@@ -18,11 +18,11 @@ function chromiumPath() {
 }
 
 // CDP keeps the DOM regressions dependency-free, like the rest of npm test.
-async function browser(t, html, url = 'https://chatgpt.com/c/synthetic') {
+async function browser(t, html, url = 'https://chatgpt.com/c/synthetic', options = {}) {
   const binary = chromiumPath();
   if (!binary) { t.skip('Set SONORA_CHROMIUM or install Playwright Chromium to run DOM checks.'); return null; }
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sonora-dom-'));
-  const child = spawn(binary, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = spawn(binary, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--remote-debugging-port=0', `--user-data-dir=${profile}`, ...options.args || [], 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   t.after(async () => {
     child.kill();
     if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
@@ -72,13 +72,13 @@ async function browser(t, html, url = 'https://chatgpt.com/c/synthetic') {
   listeners.set('Fetch.requestPaused', event => {
     send('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html' }], body: Buffer.from(html).toString('base64') }).catch(() => {});
   });
-  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  if (!options.network) await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
   await send('Page.navigate', { url });
   for (let attempt = 0; await evaluate('document.readyState') !== 'complete'; attempt++) {
     if (attempt > 100) throw new Error('Synthetic page did not load.');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  return { evaluate, send, errors };
+  return { evaluate, send, errors, port };
 }
 
 function longChatHtml(count = 500) {
@@ -95,10 +95,13 @@ function longChatHtml(count = 500) {
 async function waitFor(page, expression, timeout = 10000) {
   await page.evaluate(`new Promise((resolve, reject) => {
     const started = performance.now();
-    function check() {
-      if (${expression}) { resolve(); return; }
-      if (performance.now() - started > ${timeout}) { reject(new Error(${JSON.stringify('Timed out waiting for: ' + expression)})); return; }
-      requestAnimationFrame(check);
+    async function check() {
+      try {
+        if (await (${expression})) { resolve(); return; }
+        if (performance.now() - started > ${timeout}) throw new Error(${JSON.stringify('Timed out waiting for: ' + expression)});
+        if (globalThis.requestAnimationFrame) requestAnimationFrame(check);
+        else setTimeout(check, 20);
+      } catch (error) { reject(error); }
     }
     check();
   })`);

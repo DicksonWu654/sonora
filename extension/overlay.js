@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.11';
+  const OVERLAY_VERSION = '0.4.12';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -11,6 +11,8 @@
   }
 
   // Start the local voice before any synchronous page discovery.
+  let frameNotice = window.__sonoraFrameNotice || '';
+  delete window.__sonoraFrameNotice;
   let initialStatus = message({ type: 'sonora-status' });
   initialStatus.catch(() => {});
   let pageType = pageTypeFor(location.href);
@@ -386,6 +388,7 @@
     schedulePanelWrite();
   }
   function readyMessage() {
+    if (frameNotice) return frameNotice;
     if (isGoogleDocsPage() && !blockEntries.length) return 'Refresh this Google Doc once to enable passage highlights.';
     return 'Ready — click page text to begin.';
   }
@@ -1179,6 +1182,7 @@
     orderedEntriesDirty = false;
   }
   function updateMeta() {
+    if (frameNotice) { els.meta.textContent = frameNotice; return; }
     if (!codeEntryCount) { codeMarks.forEach(boxes => boxes.forEach(box => box.remove())); codeMarks.clear(); }
     const size = characterCount + Math.max(0, entryCount - 1) * 2;
     const text = `${entryCount} clickable ${entryCount === 1 ? 'block' : 'blocks'} · ${size.toLocaleString()} characters${isGoogleDocsPage() && size > MAX_PAGE_CHARS ? ' · queues up to 240,000' : ''}`;
@@ -1727,6 +1731,12 @@
     whenIndexed,
     whenContained,
     toggle: togglePanel,
+    setFrameNotice(notice) {
+      frameNotice = notice;
+      if (notice) els.panel.classList.remove('is-hidden');
+      updateMeta();
+      if (!state.queue.length) setStatus(readyMessage(), notice ? 'error' : 'ready');
+    },
     dispose: () => els.close.click()
   };
   loadSettings();

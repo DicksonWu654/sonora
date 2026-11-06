@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Sonora — read page aloud",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "Click article text on any page to read it aloud with your local Sonora/Kokoro voice.",
   "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
+  "optional_host_permissions": ["<all_urls>"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",

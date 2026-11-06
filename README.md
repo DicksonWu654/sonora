@@ -71,6 +71,8 @@ The repository includes a small Manifest V3 extension in `extension/`. Click its
 
 Brave supports Chrome Manifest V3 extensions, so the same unpacked extension works in both browsers. Text is split into passages under the local model's request limit; the next passage is rendered while the current one plays. The extension does not call a cloud speech API.
 
+If a page embeds its article in a frame, Sonora opens inside the readable frame. A frame hosted by another site may need permission first: Sonora opens an access tab, where **Allow this site** requests access only to that embedded site. After you allow it once, later toolbar clicks work directly. **Not now** leaves an explanation in the page's panel. Browser sandbox restrictions can still require opening the embedded document in its own tab.
+
 The current local engine is Kokoro 82M, which is already a compact neural voice. The extension's speed control preserves voice pitch and changes playback without asking the model to synthesize a second copy at each speed. CPU and CUDA setup options remain the same as the book reader; use `npm run voice:setup:gpu` when CUDA is available for lower first-passage latency.
 
 An amber highlight follows the current word using the voice model's word timings. It stays synchronized with playback speed, freezes when paused, and clears when you stop or close the reader. Regular page text uses the browser's text highlight API; Google Docs uses positioned marks over its painted words. Page text remains editable and links keep their original markup. Passages without usable timings or matching text retain the passage highlight.

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allow Sonora to read embedded text</title>
+  <link rel="stylesheet" href="reader.css">
+  <script src="frame-permission.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar"><div class="brand"><span class="mark">◒</span><span>sonora</span></div></header>
+    <section class="intro">
+      <h1>Read the embedded document</h1>
+      <p>The text on this page is hosted by <strong id="site"></strong>. Allow Sonora to read that site so clicking its text starts playback.</p>
+      <p>You only need to allow this site once. Sonora will return to your document after you choose.</p>
+    </section>
+    <section class="controls">
+      <p id="status" role="status" aria-live="polite">Choose whether Sonora may access the embedded text.</p>
+      <div class="transport">
+        <button id="deny" class="stop-button" type="button">Not now</button>
+        <button id="allow" class="play-button" type="button">Allow this site</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

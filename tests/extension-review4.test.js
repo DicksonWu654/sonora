@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { browser, longChatHtml } = require('./helpers/browser');
+const { browser, longChatHtml, waitFor } = require('./helpers/browser');
 
 async function install(page, nativeMedia = false, waitForContainment = true) {
   const wav = Buffer.alloc(44 + 48000);
@@ -172,7 +172,7 @@ test('review4 a native media error flushes status and transport behind a pending
   if (!page) return;
   await install(page, true);
   await page.evaluate('document.querySelector("p").click()');
-  await page.evaluate('new Promise(resolve => setTimeout(resolve, 100))');
+  await waitFor(page, `panel.querySelector('.status span').textContent.startsWith('Playing')`);
   assert.match(await page.evaluate('panel.querySelector(".status span").textContent'), /^Playing/);
   await page.evaluate(`(async () => {
     const raf = requestAnimationFrame, cancel = cancelAnimationFrame;

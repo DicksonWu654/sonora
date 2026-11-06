@@ -250,12 +250,18 @@ test('wheel and pointer activity defer indexing even when the page cannot scroll
   })()`);
   await install(page, false);
   await page.evaluate(`(() => {
+    // Keep the interaction inside its 150 ms idle gap even if the host delays
+    // the assertion's timer. Restore the real clock before testing completion.
+    window.interactionClock = performance.now.bind(performance);
+    const now = interactionClock();
+    performance.now = () => now;
     document.dispatchEvent(new WheelEvent('wheel', {bubbles: true, deltaY: 100}));
     startIndex();
     for (let at = 0; at < 100; at++) document.dispatchEvent(new PointerEvent('pointermove', {bubbles: true}));
   })()`);
   await page.evaluate('new Promise(resolve => setTimeout(resolve, 100))');
   assert.equal(await page.evaluate('visibleChecks'), 0);
+  await page.evaluate('performance.now = interactionClock; delete window.interactionClock');
   await page.evaluate('window.__sonoraOverlay.whenIndexed');
   assert.match(await page.evaluate(`panel.querySelector('.meta').textContent`), /^600 clickable blocks/);
   assert.deepEqual(page.errors, []);
