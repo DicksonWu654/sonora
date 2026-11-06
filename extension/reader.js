@@ -7,7 +7,7 @@ els.audio.preservesPitch = true;
 
 function setStatus(message, mode = '') { els.status.textContent = message; els.dot.className = `status-dot ${mode}`; }
 function splitText(value) {
-  return window.BookText.openingChunksFor(value);
+  return window.BookText.openingChunksFor(window.SonoraSpeech ? window.SonoraSpeech.prepare(value).text : value);
 }
 function displaySelection(selection) {
   state.text = typeof selection?.text === 'string' ? selection.text.trim() : '';

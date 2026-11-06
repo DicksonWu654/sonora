@@ -1,12 +1,46 @@
 (function (root) {
-  const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden';
+  const editableSelector = '[contenteditable]:not([contenteditable="false"]),[role="textbox"]';
+  const textNoiseSelector = 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden,.reference,[role="doc-noteref"],a[href^="#cite_note"],' + editableSelector;
   const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  const mathSelector = '.katex,.mwe-math-element,math,[role="math"],.mwe-math-fallback-image-inline,.mwe-math-fallback-image-display';
+  const syntheticNodes = new WeakSet();
+  const parentOf = node => node?.assignedSlot || node?.parentElement || node?.getRootNode?.().host || null;
+  function contains(container, node) {
+    if (!container || !node) return false;
+    if (container === node || container.contains(node)) return true;
+    for (let host = node.getRootNode?.().host; host; host = host.getRootNode?.().host) if (container === host || container.contains(host)) return true;
+    return false;
+  }
+  function closest(node, selector) {
+    for (let at = node; at; at = at.getRootNode?.().host) {
+      const found = at.closest?.(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+  function compare(a, b) {
+    if (a.getRootNode() === b.getRootNode()) return a.compareDocumentPosition(b);
+    const ancestors = node => {
+      const result = [];
+      for (let at = node; at; at = parentOf(at)) result.unshift(at);
+      return result;
+    };
+    const left = ancestors(a), right = ancestors(b);
+    let at = 0;
+    while (at < left.length && at < right.length && left[at] === right[at]) at++;
+    if (at === left.length) return 4 | 16;
+    if (at === right.length) return 2 | 8;
+    return left[at].compareDocumentPosition(right[at]);
+  }
 
   function visibleBlock(node, contained = false) {
-    if (!node?.isConnected || node.closest(textNoiseSelector)) return false;
+    if (!node?.isConnected || closest(node, textNoiseSelector)) return false;
+    for (let parent = parentOf(node); parent; parent = parentOf(parent)) {
+      if (parent.matches('details:not([open])') && !contains(parent.querySelector(':scope > summary'), node)) return false;
+    }
     const style = node.ownerDocument.defaultView.getComputedStyle(node);
     if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
-    for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    for (let ancestor = parentOf(node); ancestor; ancestor = parentOf(ancestor)) {
       const parentStyle = node.ownerDocument.defaultView.getComputedStyle(ancestor);
       if (parentStyle.opacity === '0' || parentStyle.display === 'none') return false;
     }
@@ -17,6 +51,7 @@
   }
 
   function createTextReader(node, cleanText, endPoint = null) {
+    syntheticNodes.delete(node);
     const parts = [];
     let size = 0, done = false, text = '', reachedEnd = false;
     const nestedList = node.matches('li') && node.querySelector('ul,ol,menu');
@@ -30,14 +65,27 @@
       if (child.nodeType !== 1) return;
       yield ''; // Even empty/hidden syntax nodes must yield to the caller's budget.
       if (child.matches(textNoiseSelector)) return;
+      if (child.matches('details:not([open])')) {
+        const summary = child.querySelector(':scope > summary');
+        if (summary) yield* read(summary);
+        return;
+      }
       if (nestedList && child !== node && child.matches('ul,ol,menu')) return;
       const style = node.ownerDocument.defaultView.getComputedStyle(child);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return;
+      if (child.matches(mathSelector)) { syntheticNodes.add(node); yield ' Equation. '; return; }
+      if (child.matches('img')) {
+        if (!child.closest('figure')?.querySelector('figcaption') && child.getAttribute('alt')?.trim()) { syntheticNodes.add(node); yield child.getAttribute('alt'); }
+        return;
+      }
       if (child.matches('br')) { yield '\n'; return; }
       const block = child !== node && /^(block|list-item|table-row|table-cell|flex|grid)$/.test(style.display);
       if (block) yield '\n';
       let index = 0;
-      for (let at = child.firstChild; at && !reachedEnd; at = at.nextSibling) {
+      const assigned = child.localName === 'slot' ? child.assignedNodes({ flatten: true }) : null;
+      const children = assigned?.length ? assigned : child.shadowRoot?.childNodes || child.childNodes;
+      for (const at of children) {
+        if (reachedEnd) break;
         if (child === endPoint?.node && index++ === endPoint.offset) { reachedEnd = true; break; }
         yield* read(at);
       }
@@ -73,53 +121,78 @@
     return createTextReader(node, cleanText).advance(Infinity, limit).text;
   }
 
-  const semanticSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,td,th,caption,li,dt,dd,[role="cell"],[role="gridcell"]';
+  const semanticSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,td,th,caption,figcaption,summary,img[alt],li,dt,dd,[role="cell"],[role="gridcell"],' + mathSelector;
   const customSelector = '[data-block-id],[data-slate-node="element"],[data-lexical-node="true"],[data-testid*="paragraph" i],[role="heading"],[role="paragraph"],[role="article"],[role="listitem"]';
-  const blockSelector = semanticSelector + ',' + customSelector;
+  const blockSelector = semanticSelector + ',' + customSelector + ',.commtext';
 
   // One traversal, with syntax spans and semantic block contents pruned. The
   // caller may stop between candidates instead of synchronously scanning a page.
-  function* blockCandidates(root, noiseSelector) {
+  function* blockCandidates(root, noiseSelector, onShadow = null) {
     if (!root) return;
-    const directText = [...root.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
-    if ((root.matches?.(blockSelector) && !root.matches('li,dt,dd,blockquote,' + customSelector)) || directText && !root.querySelector(blockSelector)) { yield root; return; }
+    const directText = [...root.childNodes].some(child => child.nodeType === 3 && /\S/u.test(child.data));
+    if ((root.matches?.(blockSelector) && !root.matches('li,td,' + customSelector)) || directText && !root.querySelector(blockSelector)) { yield root; return; }
     const selectedLists = new WeakSet();
     const codeContainers = new WeakMap();
+    const assigned = new WeakMap();
+    const firstChild = node => {
+      if (node.shadowRoot) { onShadow?.(node.shadowRoot); return node.shadowRoot.firstElementChild; }
+      if (node.localName === 'slot') {
+        const children = node.assignedElements({ flatten: true });
+        if (children.length) { assigned.set(node, children); return children[0]; }
+      }
+      return node.firstElementChild;
+    };
+    const nextSibling = node => node.assignedSlot && assigned.has(node.assignedSlot)
+      ? assigned.get(node.assignedSlot)[assigned.get(node.assignedSlot).indexOf(node) + 1] : node.nextElementSibling;
     let node = root;
     while (node) {
       let descend = true, candidate = false;
       if (node.matches(noiseSelector) || node.matches(textNoiseSelector)) descend = false;
       else if (node.matches(blockSelector)) {
         if (isCodeChrome(node, root, codeContainers)) descend = false;
+        else if (node.matches('td,th') && node.querySelector('table,.commtext')) descend = true;
+        else if (node.matches('summary') && selectedLists.has(node.closest('li'))) descend = false;
         else {
           const nested = node.matches('li,dt,dd,blockquote,' + customSelector)
-            && node.querySelector(semanticSelector + ',' + customSelector);
+            && !node.matches('dt,dd,blockquote,.commtext') && node.querySelector(semanticSelector + ',' + customSelector);
           if (!nested || node.matches('li') && !node.querySelector('p,pre,blockquote')) { candidate = true; if (node.matches('li')) selectedLists.add(node); }
           descend = Boolean(nested) || node.matches('li');
         }
       } else if (node.matches('div,section,span,[role="text"],[aria-label]') && !node.closest('pre') && !selectedLists.has(node.closest('li'))) {
-        const direct = [...node.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data));
+        const direct = [...node.childNodes].some(child => child.nodeType === 3 && /\S/u.test(child.data));
         if (direct && !node.querySelector(blockSelector) && !isCodeChrome(node, root, codeContainers)) { candidate = true; descend = false; }
-        else if (!node.firstElementChild && node.getAttribute('aria-label')?.length > 1) candidate = true;
+        else if (!node.firstElementChild && node.getAttribute('aria-label')?.length > 0) candidate = true;
       }
       // A caller may yield between batches while React replaces this turn.
       const successors = [];
-      if (descend && node.firstElementChild) successors.push(node.firstElementChild);
-      for (let parent = node; parent && parent !== root; parent = parent.parentElement) {
-        if (parent.nextElementSibling) successors.push(parent.nextElementSibling);
+      const child = descend && firstChild(node);
+      if (child) successors.push(child);
+      for (let parent = node; parent && parent !== root; parent = parentOf(parent)) {
+        const sibling = nextSibling(parent);
+        if (sibling) successors.push(sibling);
       }
       if (candidate) yield node;
-      node = successors.find(node => node.isConnected && root.contains(node)) || null;
+      node = successors.find(node => node.isConnected && contains(root, node)) || null;
     }
   }
 
+  const genericScopes = new WeakMap();
+  let genericScopeSequence = 0;
+  function scopeNode(node) {
+    return node.closest?.('[data-testid^="conversation-turn-"]') || node.closest?.('[data-message-id]')
+      || node.closest?.('[data-block-id],[data-testid="user-message"],.font-claude-response');
+  }
   function scopeFor(node) {
     const turn = node.closest('[data-testid^="conversation-turn-"]');
     if (turn) return `turn:${turn.getAttribute('data-testid')}`;
     const message = node.closest('[data-message-id]');
     if (message) return `message:${message.getAttribute('data-message-id')}`;
     const block = node.closest('[data-block-id]');
-    return block ? `block:${block.getAttribute('data-block-id')}` : '';
+    if (block) return `block:${block.getAttribute('data-block-id')}`;
+    const scope = scopeNode(node);
+    if (!scope) return '';
+    if (!genericScopes.has(scope)) genericScopes.set(scope, `scope:${++genericScopeSequence}`);
+    return genericScopes.get(scope);
   }
 
   function isCodeChrome(node, root, containers = null) {
@@ -207,12 +280,12 @@
   function pageIdentity(url) {
     const parsed = new URL(url);
     const chat = /^(chatgpt\.com|chat\.openai\.com)$/i.test(parsed.hostname);
-    return `${parsed.origin}${parsed.pathname}${chat ? '' : parsed.search}`;
+    return `${parsed.origin}${parsed.pathname}${chat ? '' : parsed.search}${/^#!?\//.test(parsed.hash) ? parsed.hash : ''}`;
   }
 
   // Filter before invalidating extraction/range caches. ChatGPT changes its UI
   // on every hover; those records do not alter the narration source.
-  const chromeSelector = 'script,style,noscript,template,button,input,textarea,select,nav,aside,header,footer,form,[role="button"],[role="toolbar"],[role="tooltip"],[role="navigation"],[role="menu"],.sr-only,.visually-hidden';
+  const chromeSelector = 'script,style,noscript,template,button,input,textarea,select,nav,aside,header,footer,form,[role="button"],[role="toolbar"],[role="tooltip"],[role="navigation"],[role="menu"],.sr-only,.visually-hidden,' + editableSelector;
   function contentMutations(records, overlayRoot, readableRoot) {
     const announcement = node => node.matches?.('[aria-live],[role="status"],time')
       && !node.closest('[data-message-id],[data-message-author-role],.markdown,.prose,pre,code')
@@ -236,7 +309,7 @@
     return [...records].filter(record => {
       const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
       if (!target || overlayRoot?.contains(target)) return false;
-      if (readableRoot?.isConnected && !readableRoot.contains(target)) return false;
+      if (readableRoot?.isConnected && !contains(readableRoot, target)) return false;
       if (!readableRoot?.isConnected) return true; // The readable root was replaced.
       if (target.closest?.(chromeSelector)) return false;
       const live = target.closest?.('[aria-live],[role="status"],time');
@@ -254,11 +327,11 @@
     const scopes = new Set();
     let full = false;
     if (!records || typeof records[Symbol.iterator] !== 'function') return { scopes, full: true };
-    const scopeForNode = node => node.closest?.('[data-testid^="conversation-turn-"]') || node.closest?.('[data-message-id]');
+    const scopeForNode = scopeNode;
     for (const record of records) {
       const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
       if (!target || overlayRoot?.contains?.(target)) continue;
-      if (readableRoot?.isConnected && !readableRoot.contains(target)) {
+      if (readableRoot?.isConnected && !contains(readableRoot, target)) {
         if (target.contains?.(readableRoot) && [...(record.removedNodes || [])].some(node => node.contains?.(readableRoot))) full = true;
         continue;
       }
@@ -331,7 +404,7 @@
     return parts;
   }
 
-  const api = { textNoiseSelector, blockSelector, blockCandidates, visibleBlock, createTextReader, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, contentMutations, mutationScopes, nextPart, codePassages };
+  const api = { contains, closest, parentOf, compare, syntheticText: node => syntheticNodes.has(node), editableSelector, textNoiseSelector, blockSelector, blockCandidates, visibleBlock, createTextReader, readableText, scopeFor, isCodeChrome, createReconciler, matchesPassage, pageIdentity, contentMutations, mutationScopes, nextPart, codePassages };
   if (typeof module !== 'undefined') module.exports = api;
   else root.SonoraPassages = api;
 })(globalThis);

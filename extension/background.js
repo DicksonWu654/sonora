@@ -6,6 +6,27 @@ const validation = globalThis.SonoraValidation;
 const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
 let menuTask = Promise.resolve();
 const renderControllers = new Map();
+let playbackOwner = null;
+let positionWrites = Promise.resolve();
+function validPosition(record) {
+  return record && typeof record.document === 'string' && record.document.length <= 4096
+    && typeof record.prefix === 'string' && record.prefix.length <= 160 && typeof record.text === 'string' && record.text.length > 0 && record.text.length <= 1200
+    && Number.isInteger(record.offset) && record.offset >= 0 && Number.isInteger(record.blockIndex) && record.blockIndex >= 0;
+}
+const ownerLoaded = chrome.storage.session?.get('sonoraPlaybackOwner').then(saved => { if (!playbackOwner) playbackOwner = saved.sonoraPlaybackOwner || null; }).catch(() => {}) || Promise.resolve();
+const documentKey = sender => `${sender.tab?.id ?? 'reader'}:${sender.documentId || sender.frameId || 0}:`;
+function cancelDocument(prefix) {
+  for (const [key, controller] of renderControllers) if (key.startsWith(prefix)) controller.abort(new Error('Sonora document closed; render cancelled.'));
+  if (playbackOwner && documentKey(playbackOwner).startsWith(prefix)) {
+    playbackOwner = null;
+    chrome.storage.session?.remove('sonoraPlaybackOwner').catch(() => {});
+  }
+}
+chrome.runtime.onConnect?.addListener(port => {
+  if (port.name === 'sonora-reader') port.onDisconnect.addListener(() => cancelDocument(documentKey(port.sender)));
+});
+chrome.tabs?.onRemoved?.addListener(tabId => cancelDocument(`${tabId}:`));
+chrome.tabs?.onUpdated?.addListener((tabId, info) => { if (info.status === 'loading') cancelDocument(`${tabId}:`); });
 const FETCH_TIMEOUT_MS = 30000;
 const RENDER_TIMEOUT_MS = 120000;
 
@@ -64,7 +85,7 @@ async function injectReader(tabId, frameId = 0, notice = '') {
           return true;
         }, args: [version, notice] });
         if (results?.[0]?.result) return;
-        await chrome.scripting.executeScript({ target, files: ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'words.js', 'overlay.js'] });
+        await chrome.scripting.executeScript({ target, files: ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'speech.js', 'words.js', 'overlay.js'] });
         readerInjected = true;
       }
       if (!cssInjected) {
@@ -93,6 +114,10 @@ async function injectSafely(tab) {
   try {
     const frames = globalThis.SonoraFrames;
     const top = (await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: frames.probeFrame }))?.[0]?.result;
+    if (top?.pdf) {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: url => { window.__sonoraPdfUrl = url; }, args: [top.url || tab.url] });
+      return await injectReader(tab.id);
+    }
     if (top?.readable || !top?.frames?.length) return await injectReader(tab.id);
     // Chrome returns results for frames we can access, omitting inaccessible
     // cross-origin documents. Probe them only when the top frame lacks content.
@@ -176,6 +201,40 @@ async function pageAudioSource(base, data, signal) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender?.id && chrome.runtime.id && sender.id !== chrome.runtime.id) return false;
+  if (message?.type === 'sonora-save-position') {
+    if (message.record ? !validPosition(message.record) : typeof message.document !== 'string' || message.document.length > 4096) {
+      sendResponse({ ok: false, error: 'Invalid reading position.' }); return false;
+    }
+    positionWrites = positionWrites.catch(() => {}).then(async () => {
+      const saved = await chrome.storage.local.get('sonoraPositions');
+      const document = message.record?.document || message.document;
+      const previous = (Array.isArray(saved.sonoraPositions) ? saved.sonoraPositions : []).filter(record => validPosition(record) && record.document !== document);
+      await chrome.storage.local.set({ sonoraPositions: (message.record ? [message.record, ...previous] : previous).slice(0, 20) });
+      sendResponse({ ok: true });
+    }).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === 'sonora-open-pdf-reader') {
+    serverUrl().then(base => chrome.tabs.create({ url: base + '/' })).then(() => sendResponse({ ok: true })).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === 'sonora-claim-playback') {
+    ownerLoaded.then(async () => {
+      const previous = playbackOwner;
+      const owner = { tab: sender.tab ? { id: sender.tab.id } : undefined, documentId: sender.documentId, frameId: sender.frameId };
+      playbackOwner = owner;
+      chrome.storage.session?.set({ sonoraPlaybackOwner: owner }).catch(() => {});
+      if (previous?.tab?.id !== undefined && documentKey(previous) !== documentKey(owner)) {
+        const target = previous.documentId ? { documentId: previous.documentId } : { frameId: previous.frameId || 0 };
+        try { await chrome.tabs.sendMessage(previous.tab.id, { type: 'sonora-pause-playback' }, target); } catch { /* A closed document has no playback left to pause. */ }
+      }
+      sendResponse({ ok: true, data: { owned: playbackOwner === owner } });
+    }).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === 'sonora-document-left') {
+    cancelDocument(documentKey(sender)); sendResponse({ ok: true }); return false;
+  }
   if (message?.type === 'sonora-frame-access') {
     (async () => {
       const url = new URL(sender.url);

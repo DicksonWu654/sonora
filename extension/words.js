@@ -149,7 +149,7 @@
       if (data.styles.has(parent)) return data.styles.get(parent);
       const style = document.defaultView.getComputedStyle(parent);
       const value = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0'
-        || Boolean(parent.matches?.('script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden'))
+        || Boolean(parent.matches?.(root.SonoraPassages?.textNoiseSelector || 'script,style,noscript,template,button,input,textarea,select,[role="button"],[role="toolbar"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden'))
         || hidden(parent.parentElement, data);
       data.styles.set(parent, value);
       return value;
@@ -392,7 +392,7 @@
     function prepare(entry, passage, timings) {
       clearPaint(); item = passage; clip = null;
       const matched = entry && passage.blockOffset >= 0 && entry.text.slice(passage.blockOffset, passage.blockOffset + passage.text.length) === passage.text;
-      words = matched && Array.isArray(timings) ? timings.filter(word => word && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end > word.start
+      words = matched && !entry.noWordTracking && Array.isArray(timings) ? timings.filter(word => word && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end > word.start
         && Number.isInteger(word.textOffset) && Number.isInteger(word.length) && word.textOffset >= 0 && word.length > 0 && word.textOffset + word.length <= passage.text.length).sort((a, b) => a.start - b.start) : [];
       if (entry?.rects) {
         const source = compactMap(entry.text);

@@ -11,13 +11,17 @@
       }
     } catch { return null; }
     const result = { path, url: location.href, score: 0, readable: false, frames: [] };
+    if (document.contentType === 'application/pdf' || document.body?.firstElementChild?.matches('embed[type="application/pdf"]')) {
+      result.pdf = true;
+      return result;
+    }
     // These readers already know how to find their content; never inspect their
     // subframes or walk a huge conversation before showing its controls.
     if (/^(chatgpt\.com|chat\.openai\.com)$/.test(location.hostname) && document.querySelector('[data-testid^="conversation-turn-"]')
       || location.hostname === 'docs.google.com' && location.pathname.startsWith('/document/') && document.querySelector('.kix-rotatingtilemanager')) {
       result.readable = true; result.score = 160; return result;
     }
-    const noise = 'script,style,noscript,template,nav,header,footer,aside,form,button,input,textarea,select,[role="button"],[role="toolbar"],[role="navigation"],[role="menu"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden,#sonora-overlay-root';
+    const noise = 'script,style,noscript,template,nav,header,footer,aside,form,button,input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="button"],[role="toolbar"],[role="navigation"],[role="menu"],[role="tooltip"],[hidden],[inert],[aria-hidden="true"],.sr-only,.visually-hidden,#sonora-overlay-root';
     const body = document.body || document.documentElement;
     if (!body) return result;
     const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {

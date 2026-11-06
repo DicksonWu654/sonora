@@ -73,6 +73,10 @@ Brave supports Chrome Manifest V3 extensions, so the same unpacked extension wor
 
 If a page embeds its article in a frame, Sonora opens inside the readable frame. A frame hosted by another site may need permission first: Sonora opens an access tab, where **Allow this site** requests access only to that embedded site. After you allow it once, later toolbar clicks work directly. **Not now** leaves an explanation in the page's panel. Browser sandbox restrictions can still require opening the embedded document in its own tab.
 
+Starting reading in another tab pauses the previous tab. System media controls can pause, resume, stop, or skip passages. After a reload, Sonora offers **Resume** at the saved passage when its text still matches; it keeps positions for up to 20 documents locally. Editable fields and chat drafts stay out of the reading queue, and minimizing the panel restores ordinary page clicks. For browser PDFs, **Open PDF in reader** explains how to save and import the file.
+
+Rendered equations are announced as “Equation.” Pasted URLs use a short host cue, and scripts unsupported by the English Kokoro voice are announced as “Unsupported language.” Captions, informative image descriptions, and accessible open shadow-root content are included; inline citation markers and collapsed content are skipped.
+
 The current local engine is Kokoro 82M, which is already a compact neural voice. The extension's speed control preserves voice pitch and changes playback without asking the model to synthesize a second copy at each speed. CPU and CUDA setup options remain the same as the book reader; use `npm run voice:setup:gpu` when CUDA is available for lower first-passage latency.
 
 An amber highlight follows the current word using the voice model's word timings. It stays synchronized with playback speed, freezes when paused, and clears when you stop or close the reader. Regular page text uses the browser's text highlight API; Google Docs uses positioned marks over its painted words. Page text remains editable and links keep their original markup. Passages without usable timings or matching text retain the passage highlight.

@@ -107,4 +107,4 @@ async function waitFor(page, expression, timeout = 10000) {
   })`);
 }
 
-module.exports = { browser, longChatHtml, waitFor };
+module.exports = { browser, longChatHtml, waitFor, chromiumPath };

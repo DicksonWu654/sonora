@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.12';
+  const OVERLAY_VERSION = '0.4.13';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -11,13 +11,20 @@
   }
 
   // Start the local voice before any synchronous page discovery.
-  let frameNotice = window.__sonoraFrameNotice || '';
+  const pdfSource = window.__sonoraPdfUrl;
+  delete window.__sonoraPdfUrl;
+  let frameNotice = window.__sonoraFrameNotice || (pdfSource ? 'PDF text is available in Sonora’s reader. Save this PDF, then choose it with Import file.' : '');
   delete window.__sonoraFrameNotice;
   let initialStatus = message({ type: 'sonora-status' });
   initialStatus.catch(() => {});
+  let documentPort = null;
+  let ownsPlayback = false;
+  try { documentPort = chrome.runtime.connect?.({ name: 'sonora-reader' }); } catch { /* Older injected contexts may be invalidated by a reload. */ }
   let pageType = pageTypeFor(location.href);
   const CHATGPT_CONTAINMENT = 'coarse';
   const { cleanText, chunksFor } = window.BookText;
+  const { contains: containsNode, parentOf, compare: compareNodes } = window.SonoraPassages;
+  const speech = window.SonoraSpeech;
   const speed = window.SonoraSpeed;
   const MAX_PAGE_CHARS = 240000;
   const PAGE_CLASS = 'sonora-readable-block';
@@ -67,7 +74,7 @@
   }
   function relevantScroll(event) {
     const target = event?.target;
-    return !target || target === document || target === window || source.root?.contains(target) || target.contains?.(source.root);
+    return !target || target === document || target === window || containsNode(source.root, target) || target.contains?.(source.root);
   }
   let containmentFrame = null, containedNode = null, containmentScan = null, containmentToken = 0;
   let finishContainment;
@@ -113,7 +120,7 @@
     const turns = source.root?.querySelectorAll('[data-testid^="conversation-turn-"]');
     let target = turns?.[0]?.parentElement;
     while (target && !target.contains(turns[turns.length - 1])) target = target.parentElement;
-    if (!target || !source.root.contains(target)) { setTurnContainment(false); return; }
+    if (!target || !containsNode(source.root, target)) { setTurnContainment(false); return; }
     // Prove the existing boundary safe without blocking opening or scrolling.
     // Include turn contents: a fixed menu inside a turn also needs its viewport.
     const scan = containmentScan = { target, node: target, walker: document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT), dirty: new Set(), timer: null };
@@ -251,6 +258,7 @@
       .track { height: 3px; margin: 12px 0 0; overflow: hidden; border-radius: 2px; background: #354239; }
       .track i { display: block; width: 100%; height: 100%; background: #d8b28b; transform: scaleX(0); transform-origin: left; transition: transform .15s; }
       .hint { margin: 9px 0 0; color: #718076; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .pdf-reader { margin: 12px 18px; padding: 10px; border: 0; border-radius: 5px; background: #d8b28b; color: #292018; cursor: pointer; }
       @keyframes sonar-blink { 50% { opacity: .35; } }
       @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
     </style>
@@ -260,6 +268,7 @@
       <div class="status"><i class="dot"></i><span></span></div>
       <section class="controls" aria-label="Voice controls"><label>Voice<select class="voice" aria-label="Voice"><option value="af_heart">Heart · warm</option><option value="af_bella">Bella · clear</option></select></label><label><span class="speed-caption">Speed <output class="speed-value" for="sonora-speed">1×</output></span><input id="sonora-speed" class="speed" aria-label="Speed" type="range" min="1" max="3" step="0.1" value="1"></label></section>
       <section class="selection" aria-label="Reading instructions"><p class="selection-title">Page reader ready</p><p class="selection-copy">Click any text block, table cell, or heading on the page to start there. Keep scrolling and choose another block whenever you want.</p></section>
+      <button class="pdf-reader" type="button" hidden>Open PDF in reader</button>
       <footer class="bottom"><div class="transport"><button class="stop" type="button">Stop</button><button class="play" type="button"><span class="play-icon">▶</span> <span class="play-label">Play from top</span></button></div><div class="track" aria-hidden="true"><i></i></div><p class="hint">Your page stays in place while Sonora reads.</p></footer>
       <audio preload="auto"></audio>
     </aside>`;
@@ -316,6 +325,13 @@
     closed: false,
     status: 'Checking the local voice…'
   };
+  let savedPositions = [], resumeRecord = null, resumeEntry = null, mediaBound = false;
+  if (pdfSource) {
+    const button = shadow.querySelector('.pdf-reader'); button.hidden = false;
+    shadow.querySelector('.selection-title').textContent = 'Read this PDF in Sonora';
+    shadow.querySelector('.selection-copy').textContent = 'Save this PDF, open the reader, and choose the saved file with Import file.';
+    button.addEventListener('click', () => message({ type: 'sonora-open-pdf-reader' }).catch(error => setStatus(error.message, 'error')));
+  }
   let refreshTimer = null, refreshIdle = null;
   const dirtyScopes = new Map();
   let fullRefreshPending = false;
@@ -389,6 +405,7 @@
   }
   function readyMessage() {
     if (frameNotice) return frameNotice;
+    if (resumeEntry && !state.queue.length) return 'Previous reading position found — press Resume to continue.';
     if (isGoogleDocsPage() && !blockEntries.length) return 'Refresh this Google Doc once to enable passage highlights.';
     return 'Ready — click page text to begin.';
   }
@@ -411,15 +428,48 @@
     try {
       const storage = chrome.storage?.local;
       if (!storage?.get) return;
-      Promise.resolve(storage.get(['sonoraSpeed', 'sonoraVoice'])).then(saved => {
+      Promise.resolve(storage.get(['sonoraSpeed', 'sonoraVoice', 'sonoraPositions'])).then(saved => {
         if (state.closed) return;
         if (!changedSettings.has('sonoraSpeed') && saved?.sonoraSpeed !== undefined) {
           const migrated = applySpeed(saved.sonoraSpeed);
           if (migrated !== Number(saved.sonoraSpeed)) saveSetting('sonoraSpeed', migrated);
         }
         if (!changedSettings.has('sonoraVoice') && saved?.sonoraVoice && [...els.voice.options].some(option => option.value === saved.sonoraVoice)) els.voice.value = saved.sonoraVoice;
+        savedPositions = (Array.isArray(saved?.sonoraPositions) ? saved.sonoraPositions : []).filter(validPosition).slice(0, 20);
+        if (!state.queue.length) {
+          resumeRecord = savedPositions.find(record => record.document === window.SonoraPassages.pageIdentity(location.href)) || null;
+          if (resumeRecord) for (const entry of entriesByKey.values()) offerResume(entry);
+        }
       }).catch(() => {});
     } catch { /* Storage can be unavailable in restricted test pages. */ }
+  }
+  function validPosition(record) {
+    return record && typeof record.document === 'string' && record.document.length <= 4096
+      && typeof record.prefix === 'string' && record.prefix.length <= 160 && typeof record.text === 'string' && record.text.length > 0 && record.text.length <= 1200
+      && Number.isInteger(record.offset) && record.offset >= 0 && Number.isInteger(record.blockIndex) && record.blockIndex >= 0;
+  }
+  function savePosition() {
+    const item = state.queue[state.index], entry = currentEntry();
+    if (!item || !entry || state.completed) return;
+    const record = { document: window.SonoraPassages.pageIdentity(location.href), prefix: entry.text.slice(0, 160), text: item.text,
+      offset: item.blockOffset, blockIndex: entry.index, scope: entry.scope, updatedAt: Date.now() };
+    if (!validPosition(record)) return;
+    savedPositions = [record, ...savedPositions.filter(previous => previous.document !== record.document)].slice(0, 20);
+    if (documentPort) message({ type: 'sonora-save-position', record }).catch(() => {});
+    else saveSetting('sonoraPositions', savedPositions);
+  }
+  function matchesResume(entry) {
+    return resumeRecord && entry?.node.isConnected && resumeRecord.document === window.SonoraPassages.pageIdentity(location.href)
+      && entry.text.startsWith(resumeRecord.prefix)
+      && entry.text.slice(resumeRecord.offset, resumeRecord.offset + resumeRecord.text.length) === resumeRecord.text
+      && (!/^(turn:|message:|block:)/.test(resumeRecord.scope || '') || resumeRecord.scope === entry.scope);
+  }
+  function offerResume(entry) {
+    if (!isGoogleDocsPage() && !indexingDone && !/^(turn:|message:|block:)/.test(resumeRecord?.scope || '')) return;
+    if (state.queue.length || !matchesResume(entry)) return;
+    if (!resumeEntry || Math.abs(entry.index - resumeRecord.blockIndex) < Math.abs(resumeEntry.index - resumeRecord.blockIndex)) {
+      resumeEntry = entry; updateTransport();
+    }
   }
   function message(payload) {
     return new Promise((resolve, reject) => {
@@ -526,7 +576,7 @@
     if (!activeHighlightEntry || state.index < 0 || state.completed) return;
     const affected = records.some(record => {
       const target = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
-      return target && source.root?.contains(target) && (target.contains(activeHighlightEntry.node) || activeHighlightTurn?.contains(target));
+      return target && containsNode(source.root, target) && (target.contains(activeHighlightEntry.node) || activeHighlightTurn?.contains(target));
     });
     if (!affected) return;
     wordTracker.invalidate();
@@ -596,10 +646,30 @@
     if (entry?.kind === 'code' && item && !codeScrolling && !skippedTurns.has(entry.node.closest('[data-testid^="conversation-turn-"]'))) markCodePart(entry, { text: item.text, offset: item.blockOffset }, 'sonora-current-code');
   }
   function updateTransport() {
-    const label = state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting ? 'Pause' : (state.index >= 0 && !state.completed ? 'Resume' : 'Play from top');
+    const label = state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting ? 'Pause' : (state.index >= 0 && !state.completed || resumeEntry && !state.queue.length ? 'Resume' : 'Play from top');
     pendingPanel.transport = [state.playing, label];
     panelDirty = true;
     schedulePanelWrite();
+    updateMediaSession();
+  }
+  function updateMediaSession() {
+    const media = navigator.mediaSession;
+    if (!media) return;
+    try {
+      const active = !state.closed && (!documentPort || ownsPlayback) && state.index >= 0 && !state.completed;
+      if (active && !mediaBound) {
+        const handlers = { play: () => { if (!state.playing) els.play.click(); }, pause: () => { state.pendingStart = null; pausePlayback(); setStatus('Paused', 'ready'); },
+          stop, nexttrack: () => advanceQueue(), previoustrack: () => play(Math.max(0, state.index - 1)) };
+        for (const [name, handler] of Object.entries(handlers)) try { media.setActionHandler(name, handler); } catch {}
+        mediaBound = true;
+      } else if (!active && mediaBound) {
+        for (const name of ['play','pause','stop','nexttrack','previoustrack']) try { media.setActionHandler(name, null); } catch {}
+        mediaBound = false;
+      }
+      media.playbackState = active ? (state.playing ? 'playing' : 'paused') : 'none';
+      if (active && typeof MediaMetadata !== 'undefined' && media.metadata?.title !== source.title) media.metadata = new MediaMetadata({ title: source.title || 'Sonora reading', artist: 'Sonora' });
+      if (!active) media.metadata = null;
+    } catch { /* Media controls are optional in embedded/restricted documents. */ }
   }
   function releaseAudioObjectUrl() {
     if (!state.audioObjectUrl) return;
@@ -726,6 +796,7 @@
     return true;
   }
   function pausePlayback() {
+    savePosition();
     state.queueWaiting = false;
     stopWordFrames();
     pauseWebAudio();
@@ -763,18 +834,15 @@
     for (let at = blockIndex; at < blockEntries.length && remaining > 0; at++) {
       const entry = blockEntries[at];
       const blockText = entry.text.slice(0, remaining);
-      const pieces = chunksFor(blockText, 1200);
-      const offsets = window.SonoraWords.chunkOffsets(blockText, pieces);
-      const chunks = pieces.map((text, at) => ({ text, offset: offsets[at] }));
-      chunks.filter(part => entry.index !== blockIndex || part.offset >= blockOffset)
-        .forEach(part => queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset }));
+      let cursor = at === blockIndex ? blockOffset : 0;
+      while (cursor < blockText.length) {
+        let part = window.SonoraPassages.nextPart(blockText, cursor, false, chunksFor, shortOpening && !queue.length ? window.BookText.openingChunksFor : null);
+        if (speech) part = speech.completePart(blockText, part);
+        if (!part) break;
+        queue.push({ text: part.text, blockIndex: entry.index, blockKey: entry.key, blockOffset: part.offset });
+        cursor = part.offset + part.text.length;
+      }
       remaining -= blockText.length;
-    }
-    if (shortOpening && queue.length) {
-      const first = queue[0];
-      const pieces = window.BookText.openingChunksFor(first.text);
-      const offsets = window.SonoraWords.chunkOffsets(first.text, pieces);
-      queue.splice(0, 1, ...pieces.map((text, index) => ({ ...first, text, blockOffset: first.blockOffset + offsets[index] })));
     }
     return queue;
   }
@@ -783,8 +851,8 @@
     // selected block is always first, even while background discovery runs.
     const selected = { ...entry };
     const following = [...entriesByKey.values()].filter(other => other.node !== entry.node
-      && (entry.node.compareDocumentPosition(other.node) & Node.DOCUMENT_POSITION_FOLLOWING));
-    following.sort((a, b) => a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+      && (compareNodes(entry.node, other.node) & Node.DOCUMENT_POSITION_FOLLOWING));
+    following.sort((a, b) => compareNodes(a.node, b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
     const snapshot = state.queueBlocks = [selected, ...following.map(block => ({ ...block }))];
     let opening = true;
     for (let at = 0; at < snapshot.length || !indexingDone; at++) {
@@ -793,17 +861,24 @@
       // A block selected earlier may already be known far beyond the scan.
       // Wait for discovery to fill the gap before buffering that later block.
       if (at && !indexingDone && (!discoveryFrontier
-        || (block.node.compareDocumentPosition(discoveryFrontier) & Node.DOCUMENT_POSITION_PRECEDING))) { yield null; at--; continue; }
-      let cursor = block === selected ? offset : 0;
+        || (compareNodes(block.node, discoveryFrontier) & Node.DOCUMENT_POSITION_PRECEDING))) { yield null; at--; continue; }
+      let cursor = block === selected ? offset : 0, unfinishedUrl = false;
       while (cursor < block.text.length || block.partial) {
         if (cursor >= block.text.length || !opening && block.partial && block.text.length - cursor < 1201) { yield null; continue; }
+        if (unfinishedUrl) {
+          const boundary = block.text.slice(cursor).search(/[\s<>]/u);
+          if (boundary < 0) { cursor = block.text.length; if (!block.partial) break; yield null; continue; }
+          cursor += boundary; unfinishedUrl = false;
+        }
         while (/\s/u.test(block.text[cursor] || '') && cursor < block.text.length) cursor++;
         if (cursor >= block.text.length) break;
-        const part = window.SonoraPassages.nextPart(block.text, cursor, block.kind === 'code', chunksFor, opening ? window.BookText.openingChunksFor : null);
+        let part = window.SonoraPassages.nextPart(block.text, cursor, block.kind === 'code', chunksFor, opening ? window.BookText.openingChunksFor : null);
+        if (speech) part = speech.completePart(block.text, part, block.partial);
         if (!part) break;
         opening = false;
         yield { text: part.text, blockKey: block.key, blockIndex: block.index, blockOffset: part.offset };
         cursor = part.offset + part.text.length;
+        unfinishedUrl = Boolean(part.urlContinues);
       }
     }
   }
@@ -825,14 +900,32 @@
     if (!item) return Promise.reject(new Error('No readable passage is selected.'));
     if (state.rendered.has(index)) return state.rendered.get(index);
     const requestId = `${state.revision}:${index}:${Math.random().toString(36).slice(2)}`;
-    const promise = message({ type: 'sonora-render', requestId, text: item.text, voice: els.voice.value });
+    const prepared = speech?.prepare(item.text);
+    const promise = message({ type: 'sonora-render', requestId, text: prepared?.text || item.text, voice: els.voice.value })
+      .then(result => prepared ? { ...result, words: speech.mapWords(prepared, result.words) } : result);
     state.rendered.set(index, promise);
     state.renderRequests.set(index, requestId);
     promise.catch(() => { for (const [at, value] of state.rendered) if (value === promise) state.rendered.delete(at); })
       .finally(() => { for (const [at, id] of state.renderRequests) if (id === requestId) state.renderRequests.delete(at); });
     return promise;
   }
-  const renderReadyListener = payload => {
+  async function claimPlayback(revision = state.revision) {
+    if (!documentPort || ownsPlayback) return revision === state.revision;
+    const result = await message({ type: 'sonora-claim-playback' });
+    if (revision !== state.revision || result?.owned === false) return false;
+    ownsPlayback = true;
+    return true;
+  }
+  const renderReadyListener = (payload, sender, respond) => {
+    if (payload?.type === 'sonora-pause-playback' && !state.closed) {
+      ownsPlayback = false;
+      state.revision++;
+      state.pendingStart = null;
+      pausePlayback();
+      setStatus('Paused — reading started in another tab.', 'ready');
+      respond?.({ ok: true });
+      return false;
+    }
     if (state.closed || payload?.type !== 'sonora-render-ready') return;
     if (state.renderRequests.get(state.index) !== payload.requestId) return;
     if (state.index + 1 < state.queue.length) render(state.index + 1).catch(() => {});
@@ -878,6 +971,7 @@
     if (!codeScrolling) setPanelProgress(0);
     setStatus(`Rendering passage ${passageLabel(index)}…`, 'busy');
     try {
+      if (documentPort && !ownsPlayback && !await claimPlayback(revision)) return;
       const result = await render(index);
       if (revision !== state.revision) return;
       if (!result || typeof result.src !== 'string' || !result.src) {
@@ -912,6 +1006,7 @@
       if (revision !== state.revision) return;
       state.pendingRender = false;
       state.playing = true;
+      savePosition();
       startWordFrames();
       setStatus(`Playing passage ${passageLabel(index)}`, 'ready');
       updateTransport();
@@ -925,6 +1020,7 @@
     }
   }
   function startQueue(blockIndex = 0, blockOffset = 0, clickedEntry = null) {
+    resumeRecord = resumeEntry = null;
     followReading = true;
     const selected = state.queue[state.index];
     if (state.pendingRender && selected?.blockKey === blockEntries[blockIndex]?.key && selected.blockOffset === blockOffset) return;
@@ -1023,7 +1119,7 @@
     }
   }
   function handlePageClick(event, block) {
-    if ((event.defaultPrevented && !isGoogleDocsPage()) || event.button !== 0) return;
+    if (!readingGesture(event) || (event.defaultPrevented && !isGoogleDocsPage()) || event.button !== 0) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest('button,input,textarea,select,summary,[role="button"]')) return;
     if (target?.closest('a,[role="link"]')) {
@@ -1036,6 +1132,14 @@
     }
     const entry = entriesByNode.get(block);
     if (!entry) return;
+    if (isTextDirty(block)) {
+      // A click can beat the idle refresh. Read only this block's opening;
+      // background discovery will finish a large block without delaying audio.
+      const updated = makeIncomingEntries([block], 2400)[0];
+      if (!updated) return;
+      characterCount += updated.text.length - entry.text.length;
+      Object.assign(entry, updated);
+    }
     const token = ++clickRevision;
     if (entry.kind === 'code' && event.detail !== 0) {
       selectCodeLine(entry, event, token);
@@ -1169,6 +1273,7 @@
     (entry.nodes || [entry.node]).forEach(node => entriesByNode.set(node, entry));
     if (!entriesByScope.has(entry.scope)) entriesByScope.set(entry.scope, []);
     entriesByScope.get(entry.scope).push(entry);
+    offerResume(entry);
     characterCount += entry.text.length;
     entryCount++;
     if (entry.kind === 'code') codeEntryCount++;
@@ -1176,12 +1281,17 @@
   }
   function ensureOrderedEntries() {
     if (!orderedEntriesDirty) return;
-    blockEntries = [...entriesByKey.values()].sort((a, b) => a.node === b.node ? 0 : (a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    blockEntries = [...entriesByKey.values()].sort((a, b) => a.node === b.node ? 0 : (compareNodes(a.node, b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
     blockEntries.forEach((entry, index) => { entry.index = index; });
     pageEntries = blockEntries;
     orderedEntriesDirty = false;
   }
   function updateMeta() {
+    if (resumeEntry && (!entriesByKey.has(resumeEntry.key) || !matchesResume(resumeEntry))) {
+      resumeEntry = null;
+      updateTransport();
+      if (state.ready && !state.queue.length) setStatus(readyMessage(), 'ready');
+    }
     if (frameNotice) { els.meta.textContent = frameNotice; return; }
     if (!codeEntryCount) { codeMarks.forEach(boxes => boxes.forEach(box => box.remove())); codeMarks.clear(); }
     const size = characterCount + Math.max(0, entryCount - 1) * 2;
@@ -1194,7 +1304,7 @@
     refreshIdle = null;
     refreshTimer = null;
     const navigated = !isGoogleDocsPage() && window.SonoraPassages.pageIdentity(sourceUrl) !== window.SonoraPassages.pageIdentity(location.href);
-    if (isChatGPTPage() && dirtyScopes.size && !fullRefreshPending && !navigated && source.root?.isConnected) {
+    if (!isGoogleDocsPage() && dirtyScopes.size && !fullRefreshPending && !navigated && source.root?.isConnected) {
       const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
       for (const [scope, node] of dirtyScopes) {
         const previous = entriesByScope.get(scope) || [];
@@ -1256,9 +1366,11 @@
       checkContainmentChanges(records);
       invalidateGeometry(records);
       // Class changes are observed only to keep the containment boundary safe.
-      records = [...records].filter(record => record.type !== 'attributes' || record.attributeName !== 'class');
+      const siteClasses = value => String(value || '').split(/\s+/).filter(name => name && !name.startsWith('sonora-')).sort().join(' ');
+      records = [...records].filter(record => record.type !== 'attributes' || record.attributeName !== 'class'
+        || !isChatGPTPage() && siteClasses(record.oldValue) !== siteClasses(record.target.getAttribute('class')));
     }
-    if (mutations && isChatGPTPage()) {
+    if (mutations && !isGoogleDocsPage()) {
       records = window.SonoraPassages.contentMutations(records, root, source.root);
       if (!records.length && sourceUrl === location.href) return;
     }
@@ -1267,11 +1379,11 @@
       for (const record of records) {
         let node = record.target?.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
         if (record.type === 'attributes' && node?.nodeType === Node.ELEMENT_NODE) insertedRoots.set(node, ++insertionEpoch);
-        while (node && source.root?.contains(node)) {
+        while (node && containsNode(source.root, node)) {
           dirtyTextNodes.add(node);
           textVersions.set(node, (textVersions.get(node) || 0) + 1);
           if (node === source.root) break;
-          node = node.parentElement;
+          node = parentOf(node);
         }
         // Detached edits are not observed. Rediscover inserted subtrees from
         // their live text, including blocks excluded by an earlier extraction.
@@ -1281,14 +1393,14 @@
         }
       }
     }
-    if (mutations && isChatGPTPage()) {
+    if (mutations && !isGoogleDocsPage()) {
       const batch = window.SonoraPassages.mutationScopes(records, root, source.root);
       batch.scopes.forEach(scopeNode => {
         const key = window.SonoraPassages.scopeFor(scopeNode);
         const previous = dirtyScopes.get(key);
         // Replacement records list both nodes. A removed copy must not hide
         // the live turn, including across observer batches before the flush.
-        if (!previous || !source.root?.contains(previous) || source.root.contains(scopeNode)) dirtyScopes.set(key, scopeNode);
+        if (!previous || !containsNode(source.root, previous) || containsNode(source.root, scopeNode)) dirtyScopes.set(key, scopeNode);
       });
       fullRefreshPending ||= batch.full;
       if (!dirtyScopes.size && !fullRefreshPending && sourceUrl === location.href) return;
@@ -1326,10 +1438,10 @@
     const generation = ++discoveryGeneration;
     indexingDone = false;
     discoveryFrontier = null;
-    removeEntries(entry => !entry.node.isConnected || !source.root?.contains(entry.node));
+    removeEntries(entry => !entry.node.isConnected || !containsNode(source.root, entry.node));
     const seenNodes = new Set();
     const existing = new Map([...entriesByKey.values()].map(entry => [entry.node, entry.domRevision]));
-    const candidates = window.SonoraPassages.blockCandidates(source.root, source.noiseSelector);
+    const candidates = window.SonoraPassages.blockCandidates(source.root, source.noiseSelector, observeShadow);
     let reading = null;
     function batch() {
       discoveryHandle = null;
@@ -1367,7 +1479,7 @@
           reading = null;
         } else {
           const next = candidates.next();
-          if (next.done) { removeEntries(entry => !entry.node.isConnected || !source.root.contains(entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; finishDiscovery(); resumeDiscoveredQueue(); updateMeta(); return; }
+          if (next.done) { removeEntries(entry => !entry.node.isConnected || !containsNode(source.root, entry.node) || existing.get(entry.node) === entry.domRevision && !seenNodes.has(entry.node)); indexingDone = true; orderedEntriesDirty = true; if (resumeRecord) for (const entry of entriesByKey.values()) offerResume(entry); finishDiscovery(); resumeDiscoveredQueue(); updateMeta(); return; }
           const node = next.value;
           discoveryFrontier = node;
           if (!window.SonoraPassages.visibleBlock(node, isChatGPTPage())) continue;
@@ -1386,12 +1498,12 @@
         indexEntry(entry); blockEntries.push(entry);
         markReadable(node, entry);
         const snapshot = state.queueBlocks;
-        if (snapshot && (snapshot[0].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+        if (snapshot && (compareNodes(snapshot[0].node, node) & Node.DOCUMENT_POSITION_FOLLOWING)
           && !snapshot.some(block => block.key === entry.key)) {
           let low = 1, high = snapshot.length;
           while (low < high) {
             const middle = (low + high) >> 1;
-            if (snapshot[middle].node.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) low = middle + 1;
+            if (compareNodes(snapshot[middle].node, node) & Node.DOCUMENT_POSITION_FOLLOWING) low = middle + 1;
             else high = middle;
           }
           snapshot.splice(low, 0, { ...entry });
@@ -1404,7 +1516,9 @@
   discoverPage();
   source.blocks = [];
   const pageClickListener = event => {
-    if (!(event.target instanceof Element)) return;
+    if (!readingGesture(event)) return;
+    const target = event.composedPath?.().find(node => node instanceof Element) || event.target;
+    if (!(target instanceof Element)) return;
     if (event.target === root || root.contains(event.target)) return;
     if (isGoogleDocsPage()) {
       const surface = googleDocsSurface(source.root);
@@ -1415,15 +1529,18 @@
       if (entry) { event.preventDefault(); event.stopPropagation(); }
       return;
     }
-    let block = event.target.closest(`.${pageClass}`) || event.target.closest(window.SonoraPassages.blockSelector);
+    let block = target.closest(`.${pageClass}`) || target.closest(window.SonoraPassages.blockSelector);
+    for (let parent = block?.parentElement; parent && containsNode(source.root, parent); parent = parent.parentElement) {
+      if (entriesByNode.has(parent)) { block = parent; break; }
+    }
     if (!block) {
-      for (let node = event.target; node && source.root?.contains(node); node = node.parentElement) {
+      for (let node = target; node && containsNode(source.root, node); node = parentOf(node)) {
         if ((node.matches('div,section,span') || node === source.root) && !node.querySelector(window.SonoraPassages.blockSelector)
-          && [...node.childNodes].some(child => child.nodeType === 3 && /\S.{1}/u.test(child.data))) block = node;
+          && [...node.childNodes].some(child => child.nodeType === 3 && /\S/u.test(child.data))) block = node;
         if (node === source.root) break;
       }
     }
-    if (!block || !source.root?.contains(block) || block.closest(source.noiseSelector)
+    if (!block || !containsNode(source.root, block) || block.closest(source.noiseSelector)
       || window.SonoraPassages.isCodeChrome(block, source.root)) return;
     if (!entriesByNode.has(block)) {
       for (const entry of reconcileEntries([], makeIncomingEntries([block], 2400))) {
@@ -1435,12 +1552,18 @@
     handlePageClick(event, block);
   };
   document.addEventListener('click', pageClickListener, true);
+  function readingGesture(event) {
+    const target = event.composedPath?.().find(node => node instanceof Element) || event.target;
+    return !els.panel.classList.contains('is-hidden') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+      && !(target instanceof Element && window.SonoraPassages.closest(target, window.SonoraPassages.editableSelector));
+  }
   const docsPointerDownListener = event => {
+    if (!readingGesture(event)) return;
     if (event.target === root) return;
     if (!isGoogleDocsPage()) {
       const target = event.target instanceof Element ? event.target : null;
       const code = target?.closest('pre');
-      if (event.button === 0 && code && source.root?.contains(code) && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+      if (event.button === 0 && code && containsNode(source.root, code) && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
         && !target.closest('button,input,textarea,select,[role="button"],a,[role="link"]')) event.preventDefault();
       return;
     }
@@ -1512,18 +1635,30 @@
   const pageObserver = new MutationObserver(records => {
     // React can move the same conversation beneath new wrappers. Rebind the
     // shallow ancestor watches without rediscovering its unchanged passages.
-    if (source.root?.isConnected && records.some(record => !source.root.contains(record.target)
+    if (source.root?.isConnected && records.some(record => !containsNode(source.root, record.target)
       && [...record.removedNodes].some(node => node.nodeType === 1 && node.contains(source.root)))) {
       observeSource();
       wordPositionListener();
     }
     scheduleBlockRefresh(records);
   });
+  const shadowRoots = new Set();
+  const observerOptions = { childList: true, subtree: true, characterData: true, attributes: true, attributeOldValue: true,
+    attributeFilter: ['hidden', 'aria-hidden', 'style', 'open', ...(!isChatGPTPage() || visibilityStyle && CHATGPT_CONTAINMENT === 'coarse' ? ['class'] : [])] };
+  function observeShadow(shadow) {
+    if (shadowRoots.has(shadow)) return;
+    shadowRoots.add(shadow);
+    pageObserver.observe(shadow, observerOptions);
+  }
   const observeSource = () => {
     pageObserver.disconnect();
     const rootNode = source.root || document.body || document.documentElement;
     if (!rootNode) return false;
-    pageObserver.observe(rootNode, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-hidden', 'style', ...(visibilityStyle && CHATGPT_CONTAINMENT === 'coarse' ? ['class'] : [])] });
+    pageObserver.observe(rootNode, observerOptions);
+    for (const shadow of shadowRoots) {
+      if (!shadow.host.isConnected || !containsNode(rootNode, shadow.host)) shadowRoots.delete(shadow);
+      else pageObserver.observe(shadow, observerOptions);
+    }
     // Watch only direct child replacement on the ancestor chain. Sidebar and
     // composer traffic outside the source needs no subtree observer.
     for (let ancestor = rootNode.parentElement; ancestor; ancestor = ancestor.parentElement) pageObserver.observe(ancestor, { childList: true });
@@ -1545,7 +1680,13 @@
       updateBlocks(selectReadableBlocks(source.root, source.noiseSelector));
     }, { once: true });
   }
-  els.play.addEventListener('click', () => {
+  els.play.addEventListener('click', async () => {
+    if (resumeEntry && (!matchesResume(resumeEntry) || isTextDirty(resumeEntry.node))) resumeEntry = null;
+    if (!state.queue.length && resumeEntry && resumeRecord) {
+      const entry = resumeEntry, offset = resumeRecord.offset;
+      primeAudioContext(); startQueue(entry.index, offset, entry); return;
+    }
+    if (documentPort && !ownsPlayback && !state.playing && !state.pendingRender && !await claimPlayback()) return;
     if (state.playing || state.pendingRender || state.pendingStart !== null || state.queueWaiting) {
       state.pendingStart = null;
       pausePlayback();
@@ -1631,6 +1772,9 @@
       state.queueEnded = false;
       state.pendingRender = false;
       state.completed = true;
+      savedPositions = savedPositions.filter(record => record.document !== window.SonoraPassages.pageIdentity(location.href));
+      if (documentPort) message({ type: 'sonora-save-position', document: window.SonoraPassages.pageIdentity(location.href) }).catch(() => {});
+      else saveSetting('sonoraPositions', savedPositions);
       resetWords();
       setPanelProgress(1);
       updateTransport();
@@ -1679,12 +1823,20 @@
     els.panel.classList.toggle('is-hidden');
   }
   els.minimize.addEventListener('click', togglePanel);
+  const leaveDocument = () => {
+    state.pendingStart = null;
+    pausePlayback();
+    message({ type: 'sonora-document-left' }).catch(() => {});
+  };
+  window.addEventListener('pagehide', leaveDocument);
   els.close.addEventListener('click', () => {
+    savePosition();
     resetWords();
     wordTracker.reset(true); codeRange.reset();
     state.queueIterator = null; state.queueBlocks = state.queueStart = null; state.queue = [];
     entriesByKey.clear(); entriesByScope.clear(); blockEntries = pageEntries = [];
     state.closed = true;
+    updateMediaSession();
     clickRevision++;
     state.revision++;
     cancelRendered();
@@ -1695,9 +1847,12 @@
     decodedAudio = null;
     releaseAudioObjectUrl();
     pageObserver.disconnect();
+    shadowRoots.clear();
     setTurnContainment(false, true);
     document.removeEventListener('contentvisibilityautostatechange', visibilityListener, true);
     chrome.runtime.onMessage?.removeListener(renderReadyListener);
+    window.removeEventListener('pagehide', leaveDocument);
+    documentPort?.disconnect();
     document.removeEventListener('click', pageClickListener, true);
     document.removeEventListener('pointerdown', docsPointerDownListener, true);
     document.removeEventListener('pointermove', docsPointerListener, true);
@@ -1786,11 +1941,11 @@
     return nodes.map(node => {
       const text = readableText(node, limit);
       const cached = extractionCache.get(node);
-      return { node, text, useRectangles: isChatGPTPage(), partial: Boolean(cached.partial), domRevision: cached.revision, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
+      return { node, text, noWordTracking: window.SonoraPassages.syntheticText(node), useRectangles: isChatGPTPage() || Boolean(node.getRootNode().host), partial: Boolean(cached.partial), domRevision: cached.revision, scope: window.SonoraPassages.scopeFor(node), ...(node.matches('pre')
         ? { kind: 'code', contentNode: node.querySelector('code') || node } : {}) };
     })
       .filter(entry => entry.kind === 'code' ? entry.partial || /[\p{L}\p{N}]/u.test(entry.text)
-        : entry.text.length > (entry.node.matches('td, th, [role="cell"], [role="gridcell"]') ? 0 : 1));
+        : /[\p{L}\p{N}]/u.test(entry.text));
   }
 
   function selectReadableBlocks(root, noiseSelector) {
@@ -1802,13 +1957,15 @@
     return [...window.SonoraPassages.blockCandidates(root, noiseSelector)].filter(node => {
       if (!window.SonoraPassages.visibleBlock(node, isChatGPTPage())) return false;
       const value = readableText(node);
-      return value.length > (node.matches('pre,td,th,[role="cell"],[role="gridcell"]') ? 0 : 1);
+      return /[\p{L}\p{N}]/u.test(value);
     });
   }
 
   function findReadableSource() {
     const noiseSelector = [
       'script', 'style', 'noscript', 'template', 'nav', 'header', 'footer', 'aside', 'form',
+      window.SonoraPassages.editableSelector, '#hnmain .comhead', '#hnmain .reply', '#hnmain .pagetop', '#hnmain .subtext',
+      '[role="dialog"]', '[aria-modal="true"]', '[role="complementary"]', '.subscribe-widget', '.subscription-widget', '.paywall', '.baseline-indicator',
       '[role="navigation"]', '[role="banner"]', '[role="toolbar"]', '[role="menu"]', '[role="menubar"]', '[role="tablist"]', '[role="button"]',
       '[role="tooltip"]', '[hidden]', '[inert]', '.sr-only', '.visually-hidden',
       '[aria-label*="navigation" i]', '[aria-label*="toolbar" i]', '[aria-label*="menu" i]',
@@ -1833,11 +1990,17 @@
     }
     const chat = isChatGPTPage();
     const firstReadable = selector => [...document.querySelectorAll(selector)].find(node => !node.closest(noiseSelector));
-    const root = chat ? document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body
+    let root = chat ? document.querySelector('[role="region"][aria-label="Conversation"]') || document.querySelector('main') || document.body
       : firstReadable('#mw-content-text .mw-parser-output, #mw-content-text')
         || firstReadable('main,[role="main"],.post-content,.article-content,.entry-content,.markdown-body')
         || firstReadable('article')
         || document.body || document.documentElement;
+    if (!chat) {
+      const articles = root.querySelectorAll('article');
+      const prose = root.querySelector('#readme article, article.markdown-body, [itemprop=\"articleBody\"]');
+      if (prose && !prose.closest(noiseSelector)) root = prose;
+      else if (articles.length === 1 && !articles[0].closest(noiseSelector)) root = articles[0];
+    }
     return { root, blocks: [], text: '', noiseSelector, title: cleanText(document.title || 'Untitled page') };
   }
 })();

@@ -72,7 +72,7 @@ test('reattached paragraphs narrate edits made while detached', async t => {
 });
 
 test('previously excluded paragraphs become readable after growing', async t => {
-  const page = await browser(t, '<main><p id="growing">A</p><p>Existing readable paragraph.</p></main>', 'https://example.test/article');
+  const page = await browser(t, '<main><p id="growing">.</p><p>Existing readable paragraph.</p></main>', 'https://example.test/article');
   if (!page) return;
   await install(page);
   assert.equal(await page.evaluate(`document.querySelector('#growing').classList.contains('sonora-readable-block')`), false);

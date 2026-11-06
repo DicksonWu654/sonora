@@ -104,7 +104,7 @@ test('idle rediscovery removes paragraphs that shrink or become hidden', async t
   if (!page) return;
   await install(page);
   await page.evaluate('startIndex(); window.__sonoraOverlay.whenIndexed');
-  await page.evaluate(`document.querySelector('p').textContent = 'A'`);
+  await page.evaluate(`document.querySelector('p').textContent = '.'`);
   await new Promise(resolve => setTimeout(resolve, 180));
   await page.evaluate('startIndex()');
   await new Promise(resolve => setTimeout(resolve, 80));
