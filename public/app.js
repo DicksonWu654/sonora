@@ -7,7 +7,11 @@ const els = {
   chapterTitle: $('chapter-title'), chapterSubtitle: $('chapter-subtitle'), progressCopy: $('progress-copy'), progressBar: $('reading-progress-bar'), bookText: $('book-text'),
   voiceOrb: $('voice-orb'), voiceState: $('voice-state'), voiceDetail: $('voice-detail'), voiceSelect: $('voice-select'), listen: $('listen-btn'), audio: $('audio')
 };
-const state = { book: null, current: 0, voiceReady: false, voiceState: 'loading', queue: [], queueIndex: -1, playing: false, words: [], currentPassage: '', generation: 0, browserUtterance: null };
+const state = {
+  book: null, current: 0, voiceReady: false, voiceState: 'loading', queue: [], queueIndex: -1,
+  playing: false, playback: 'idle', activeEngine: null, words: [], currentPassage: '', generation: 0,
+  browserUtterance: null, pendingRender: null, nextRender: null, chapterText: '', paragraphTargets: [], queueOffsets: []
+};
 
 function showToast(message, ms = 3800) { els.toast.textContent = message; els.toast.classList.add('show'); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => els.toast.classList.remove('show'), ms); }
 function escapeHTML(value) { return value.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -69,15 +73,22 @@ async function readBook(file, titleOverride = '') {
 }
 function renderChapter() {
   const chapter = state.book.chapters[state.current]; if (!chapter) return;
-  stopPlayback(); state.queue = chapter.chunks; state.queueIndex = -1; state.currentPassage = ''; state.words = [];
+  stopPlayback();
   els.bookTitle.textContent = state.book.title; els.bookMeta.textContent = `${state.book.chapters.length} ${state.book.chapters.length === 1 ? 'passage' : 'chapters'} · ${formatMinutes(state.book.text.length)} min read`;
   els.chapterTitle.textContent = chapter.title; els.chapterSubtitle.textContent = `${chapter.text.length.toLocaleString()} characters · ${chapter.chunks.length} listening ${chapter.chunks.length === 1 ? 'passage' : 'passages'}`;
   els.progressCopy.textContent = `${state.current + 1} / ${state.book.chapters.length}`; els.progressBar.style.width = `${((state.current + 1) / state.book.chapters.length) * 100}%`;
   els.list.innerHTML = state.book.chapters.map((item, i) => `<button class="chapter-item ${i === state.current ? 'active' : ''}" data-chapter="${i}" type="button"><span class="chapter-index">${String(i + 1).padStart(2, '0')}</span>${escapeHTML(item.title)}</button>`).join('');
   els.bookText.innerHTML = paragraphs(chapter.text).map((p, i) => `<p data-passage="${i}" tabindex="0">${escapeHTML(p)}</p>`).join('');
+  // Use the same normalized text for speech offsets and the persistent chapter DOM.
+  state.chapterText = paragraphs(chapter.text).join('\n\n');
+  let offset = 0;
+  state.paragraphTargets = [...els.bookText.children].map(node => {
+    const target = { node, start: offset, end: offset + node.textContent.length };
+    offset = target.end + 2;
+    return target;
+  });
   els.voiceState.textContent = 'Ready when you are'; els.voiceDetail.textContent = state.voiceReady ? 'Local voice · click to begin' : 'Browser voice · click to begin';
   els.list.querySelectorAll('[data-chapter]').forEach((button) => button.addEventListener('click', () => { state.current = Number(button.dataset.chapter); renderChapter(); }));
-  els.bookText.querySelectorAll('[data-passage]').forEach((paragraph) => { paragraph.addEventListener('click', () => playPassage(Number(paragraph.dataset.passage))); paragraph.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); playPassage(Number(paragraph.dataset.passage)); } }); });
 }
 function showReader(book) { state.book = book; state.current = 0; els.landing.hidden = true; els.reader.hidden = false; els.reset.hidden = false; renderChapter(); }
 function setChip(mode, text) { els.chip.className = `engine-chip ${mode}`; els.chipText.textContent = text; }
@@ -85,39 +96,144 @@ async function checkVoice() {
   try { const response = await fetch('/api/narration/status'); const data = await response.json(); state.voiceReady = data.ready; state.voiceState = data.state; setChip(data.ready ? 'ready' : data.state === 'loading' ? 'loading' : 'fallback', data.ready ? 'local voice ready' : data.state === 'loading' ? 'warming local voice' : 'browser voice fallback'); }
   catch { state.voiceReady = false; state.voiceState = 'fallback'; setChip('fallback', 'browser voice fallback'); }
 }
-function renderWords(text, words) {
-  if (!words?.length) return escapeHTML(text).replace(/\n\n/g, '</p><p>');
-  let html = ''; let cursor = 0;
-  for (const word of words) { const start = Math.max(cursor, word.textOffset); const end = Math.min(text.length, start + word.length); if (end <= start) continue; html += escapeHTML(text.slice(cursor, start)); html += `<span class="word" data-word="${words.indexOf(word)}">${escapeHTML(text.slice(start, end))}</span>`; cursor = end; }
-  return html + escapeHTML(text.slice(cursor));
+function setTextHighlight(name, start, length) {
+  if (!globalThis.CSS?.highlights || !globalThis.Highlight) return;
+  CSS.highlights.delete(name);
+  if (!Number.isFinite(start) || !(length > 0)) return;
+  const targets = state.paragraphTargets.filter(target => target.end > start && target.start < start + length);
+  if (!targets.length) return;
+  const first = targets[0], last = targets.at(-1), range = document.createRange();
+  range.setStart(first.node.firstChild, Math.max(0, start - first.start));
+  range.setEnd(last.node.firstChild, Math.min(last.node.textContent.length, start + length - last.start));
+  CSS.highlights.set(name, new Highlight(range));
+}
+function highlightPassage(chunk) {
+  state.currentPassage = chunk;
+  setTextHighlight('sonora-word');
+  setTextHighlight('sonora-passage', state.queueOffsets[state.queueIndex], chunk.length);
 }
 function highlightWord(time) {
-  if (!state.words.length) return; let index = -1; for (let i = 0; i < state.words.length; i++) { if (time >= state.words[i].start && time < state.words[i].end) { index = i; break; } }
-  els.bookText.querySelectorAll('.word.is-active').forEach((node) => node.classList.remove('is-active')); if (index >= 0) els.bookText.querySelector(`[data-word="${index}"]`)?.classList.add('is-active');
+  const word = state.words.find(word => time >= word.start && time < word.end);
+  setTextHighlight('sonora-word', word ? state.queueOffsets[state.queueIndex] + word.textOffset : undefined, word?.length);
 }
-async function generateChunk(text) {
-  const voice = els.voiceSelect.value; const response = await fetch('/api/narration/render', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({text, voice})});
+async function generateChunk(text, voice, signal) {
+  const response = await fetch('/api/narration/render', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({text, voice}), signal});
   const data = await response.json(); if (!response.ok) throw new Error(data.error || 'The local voice could not render this passage.'); return data;
 }
+function renderRequest(index) {
+  const controller = new AbortController();
+  const request = { index, text: state.queue[index], voice: els.voiceSelect.value, generation: state.generation, controller };
+  // Speculation may fail before it is consumed. Keep the rejection handled until
+  // this request becomes current, when its error can be shown to the listener.
+  request.result = generateChunk(request.text, request.voice, controller.signal).then(data => ({data}), error => ({error}));
+  return request;
+}
+function cancelNextRender() {
+  state.nextRender?.controller.abort();
+  state.nextRender = null;
+}
+function prefetchNext() {
+  if (state.activeEngine !== 'local' || state.queueIndex + 1 >= state.queue.length || state.nextRender) return;
+  state.nextRender = renderRequest(state.queueIndex + 1);
+}
+function setPlayback(playback) {
+  state.playback = playback;
+  state.playing = playback === 'playing';
+  updatePlayingUI();
+}
+function playbackError(error, generation) {
+  if (generation !== state.generation) return;
+  stopPlayback();
+  els.voiceState.textContent = 'Could not play this passage';
+  showToast(error.message);
+}
 async function playLocal() {
-  const generation = ++state.generation; const chunk = state.queue[state.queueIndex]; if (!chunk) return;
+  const generation = state.generation, chunk = state.queue[state.queueIndex]; if (!chunk) return;
+  setPlayback('pending');
   els.voiceState.textContent = state.queue.length > 1 ? `Preparing passage ${state.queueIndex + 1} of ${state.queue.length}` : 'Preparing your chapter'; els.voiceDetail.textContent = 'Kokoro · local neural voice';
+  let request = state.nextRender;
+  state.nextRender = null;
+  if (request && (request.index !== state.queueIndex || request.text !== chunk || request.voice !== els.voiceSelect.value || request.generation !== generation)) {
+    request.controller.abort(); request = null;
+  }
+  request ||= renderRequest(state.queueIndex);
+  state.pendingRender = request;
   try {
-    const rendered = await generateChunk(chunk); if (generation !== state.generation) return;
-    state.words = rendered.words || []; state.currentPassage = chunk; els.bookText.innerHTML = `<p>${renderWords(chunk, state.words)}</p>`; els.audio.src = rendered.audioUrl; els.audio.currentTime = 0; await els.audio.play(); state.playing = true; updatePlayingUI();
-  } catch (error) { state.playing = false; updatePlayingUI(); showToast(error.message); }
+    const {data: rendered, error} = await request.result;
+    if (generation !== state.generation || request.controller.signal.aborted) return;
+    if (error) throw error;
+    state.words = rendered.words || []; highlightPassage(chunk);
+    els.audio.src = rendered.audioUrl; els.audio.currentTime = 0;
+    await els.audio.play();
+    if (generation !== state.generation) return;
+    state.pendingRender = null;
+    setPlayback('playing');
+    els.voiceState.textContent = `Playing passage ${state.queueIndex + 1} of ${state.queue.length}`;
+    prefetchNext();
+  } catch (error) { playbackError(error, generation); }
 }
 function playBrowser() {
   const chunk = state.queue[state.queueIndex]; if (!chunk || !('speechSynthesis' in window)) return showToast('This browser does not provide speech synthesis.');
-  speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(chunk); utterance.rate = .94; utterance.onstart = () => { state.playing = true; updatePlayingUI(); }; utterance.onend = () => finishChunk(); utterance.onerror = () => { state.playing = false; updatePlayingUI(); };
-  utterance.onboundary = (event) => { const start = event.charIndex || 0; els.bookText.innerHTML = `<p>${escapeHTML(chunk.slice(0, start))}<span class="word is-active">${escapeHTML(chunk.slice(start, start + (event.charLength || 3)) || ' ')}</span>${escapeHTML(chunk.slice(start + (event.charLength || 3)))}</p>`; };
+  const generation = state.generation, utterance = new SpeechSynthesisUtterance(chunk);
+  const current = () => generation === state.generation && state.browserUtterance === utterance;
+  utterance.rate = .94;
+  setPlayback('pending'); highlightPassage(chunk);
+  els.voiceState.textContent = 'Preparing browser voice'; els.voiceDetail.textContent = 'Browser voice';
+  utterance.onstart = () => { if (current()) { setPlayback('playing'); els.voiceState.textContent = `Playing passage ${state.queueIndex + 1} of ${state.queue.length}`; } };
+  utterance.onend = () => { if (current()) finishChunk(); };
+  utterance.onerror = () => { if (current()) playbackError(new Error('The browser voice could not read this passage.'), generation); };
+  utterance.onboundary = event => { if (current() && state.playing) setTextHighlight('sonora-word', state.queueOffsets[state.queueIndex] + event.charIndex, event.charLength || 3); };
   state.browserUtterance = utterance; speechSynthesis.speak(utterance);
 }
-function playPassage(index = 0) { const parts = paragraphs(state.book.chapters[state.current].text); state.queue = chunksFor(parts[index] || state.book.chapters[state.current].text); state.queueIndex = 0; state.generation++; if (els.voiceSelect.value === 'browser' || !state.voiceReady) playBrowser(); else playLocal(); }
-function listenChapter() { state.queue = state.book.chapters[state.current].chunks; state.queueIndex = 0; state.generation++; if (els.voiceSelect.value === 'browser' || !state.voiceReady) playBrowser(); else playLocal(); }
-function finishChunk() { if (state.queueIndex + 1 < state.queue.length) { state.queueIndex++; if (els.voiceSelect.value === 'browser' || !state.voiceReady) playBrowser(); else playLocal(); } else { state.playing = false; state.queueIndex = -1; els.voiceState.textContent = 'Chapter complete'; els.voiceDetail.textContent = 'Choose another passage to continue'; updatePlayingUI(); } }
-function stopPlayback() { state.generation++; state.playing = false; speechSynthesis?.cancel(); els.audio.pause(); els.audio.removeAttribute('src'); updatePlayingUI(); }
-function updatePlayingUI() { els.voiceOrb.classList.toggle('is-playing', state.playing); els.listen.classList.toggle('is-playing', state.playing); els.listen.querySelector('span:last-child').textContent = state.playing ? 'Pause listening' : 'Listen to chapter'; els.listen.querySelector('.play-icon').textContent = state.playing ? 'Ⅱ' : '▶'; }
+function startQueue(offset = 0) {
+  stopPlayback();
+  state.queue = chunksFor(state.chapterText.slice(offset));
+  state.queueOffsets = state.queue.map(chunk => { const start = state.chapterText.indexOf(chunk, offset); offset = start + chunk.length; return start; });
+  state.queueIndex = 0;
+  state.activeEngine = els.voiceSelect.value === 'browser' || !state.voiceReady ? 'browser' : 'local';
+  if (state.activeEngine === 'browser') playBrowser(); else playLocal();
+}
+function playPassage(index = 0) { startQueue(state.paragraphTargets[index]?.start || 0); }
+function listenChapter() { startQueue(); }
+function finishChunk() {
+  if (!state.playing) return;
+  if (state.queueIndex + 1 < state.queue.length) {
+    state.queueIndex++;
+    if (state.activeEngine === 'browser') playBrowser(); else playLocal();
+  } else {
+    stopPlayback(); els.voiceState.textContent = 'Chapter complete'; els.voiceDetail.textContent = 'Choose another passage to continue';
+  }
+}
+function stopPlayback() {
+  state.generation++;
+  state.pendingRender?.controller.abort(); state.pendingRender = null; cancelNextRender();
+  state.browserUtterance = null; state.activeEngine = null; state.queueIndex = -1; state.words = []; state.currentPassage = '';
+  window.speechSynthesis?.cancel(); els.audio.pause(); els.audio.removeAttribute('src'); els.audio.load();
+  setTextHighlight('sonora-word'); setTextHighlight('sonora-passage');
+  setPlayback('idle'); els.voiceState.textContent = 'Listening stopped'; els.voiceDetail.textContent = 'Click a paragraph or listen again';
+}
+async function toggleListening() {
+  if (state.playback === 'pending') { stopPlayback(); return; }
+  if (state.playback === 'playing') {
+    if (state.activeEngine === 'browser') speechSynthesis.pause(); else els.audio.pause();
+    setPlayback('paused'); els.voiceState.textContent = 'Listening paused';
+  } else if (state.playback === 'paused') {
+    const generation = state.generation;
+    try {
+      if (state.activeEngine === 'browser') speechSynthesis.resume();
+      else { setPlayback('pending'); await els.audio.play(); }
+      if (generation !== state.generation) return;
+      setPlayback('playing'); els.voiceState.textContent = `Playing passage ${state.queueIndex + 1} of ${state.queue.length}`;
+    } catch (error) { playbackError(error, generation); }
+  } else listenChapter();
+}
+function updatePlayingUI() {
+  const pending = state.playback === 'pending', paused = state.playback === 'paused';
+  els.voiceOrb.classList.toggle('is-playing', state.playing); els.listen.classList.toggle('is-playing', state.playing);
+  els.listen.setAttribute('aria-busy', String(pending));
+  els.listen.querySelector('span:last-child').textContent = pending ? 'Cancel preparation' : state.playing ? 'Pause listening' : paused ? 'Resume listening' : 'Listen to chapter';
+  els.listen.querySelector('.play-icon').textContent = pending ? '×' : state.playing ? 'Ⅱ' : '▶';
+}
 async function loadSample() {
   els.sample.disabled = true; showToast('Loading a public-domain copy of Moby-Dick…', 2000);
   try {
@@ -130,7 +246,28 @@ async function loadSample() {
   } catch (error) { showToast(error.message); } finally { els.sample.disabled = false; }
 }
 els.input.addEventListener('change', async () => { const file = els.input.files?.[0]; if (!file) return; try { showToast(`Reading ${file.name}…`, 3000); showReader(await readBook(file)); } catch (error) { showToast(error.message); } finally { els.input.value = ''; } });
-els.sample.addEventListener('click', loadSample); els.reset.addEventListener('click', () => { stopPlayback(); els.reader.hidden = true; els.landing.hidden = false; els.reset.hidden = true; }); els.railImport.addEventListener('click', () => els.input.click()); els.listen.addEventListener('click', () => { if (state.playing) { if (els.voiceSelect.value === 'browser') speechSynthesis.pause(); else els.audio.pause(); state.playing = false; updatePlayingUI(); } else if (state.queueIndex >= 0) { if (els.voiceSelect.value === 'browser') speechSynthesis.resume(); else els.audio.play(); state.playing = true; updatePlayingUI(); } else listenChapter(); }); els.audio.addEventListener('timeupdate', () => highlightWord(els.audio.currentTime)); els.audio.addEventListener('ended', finishChunk); els.voiceSelect.addEventListener('change', () => { if (state.playing) stopPlayback(); });
+els.sample.addEventListener('click', loadSample);
+els.reset.addEventListener('click', () => { stopPlayback(); els.reader.hidden = true; els.landing.hidden = false; els.reset.hidden = true; });
+els.railImport.addEventListener('click', () => els.input.click());
+els.listen.addEventListener('click', toggleListening);
+function selectParagraph(event) {
+  if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+  const paragraph = event.target.closest('[data-passage]');
+  if (!paragraph || !els.bookText.contains(paragraph)) return;
+  if (event.type === 'keydown') event.preventDefault();
+  playPassage(Number(paragraph.dataset.passage));
+}
+els.bookText.addEventListener('click', selectParagraph);
+els.bookText.addEventListener('keydown', selectParagraph);
+els.audio.addEventListener('timeupdate', () => { if (state.activeEngine === 'local' && state.playing) highlightWord(els.audio.currentTime); });
+els.audio.addEventListener('ended', () => { if (state.activeEngine === 'local') finishChunk(); });
+els.audio.addEventListener('error', () => { if (state.activeEngine === 'local') playbackError(new Error('The local audio could not be played.'), state.generation); });
+els.audio.addEventListener('ratechange', () => {
+  if (state.playback === 'pending') stopPlayback();
+  else cancelNextRender();
+});
+els.voiceSelect.addEventListener('change', stopPlayback);
+window.addEventListener('pagehide', stopPlayback);
 async function exportBook(preview) {
   if (!state.book) return;
   const button = $(preview ? 'preview-btn' : 'export-btn');

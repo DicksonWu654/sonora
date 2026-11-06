@@ -18,7 +18,7 @@ html, body { min-height: 100%; }
 body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-button:focus-visible, label:focus-visible, select:focus-visible, .book-text:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 4px; }
+button:focus-visible, label:focus-visible, select:focus-visible, .book-text:focus-visible, .book-text [data-passage]:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 4px; }
 [hidden] { display: none !important; }
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 .topbar { height: 76px; display: flex; align-items: center; padding: 0 clamp(22px, 4vw, 64px); border-bottom: 1px solid var(--line); gap: 24px; position: relative; z-index: 3; }
@@ -93,8 +93,9 @@ main { flex: 1; }
 .book-text { color: #d8ddd5; max-width: 640px; font: 18px/1.86 var(--serif); outline: none; }
 .book-text p { margin: 0 0 1.45em; }
 .book-text .chapter-break { margin: 34px 0 15px; color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
-.word { transition: background .1s, color .1s; border-radius: 2px; }
-.word.is-active { color: var(--accent-ink); background: var(--accent); }
+.book-text [data-passage] { cursor: pointer; }
+::highlight(sonora-passage) { background: #a9bd8b18; }
+::highlight(sonora-word) { color: var(--accent-ink); background: var(--accent); }
 .listen-rail { border-left: 1px solid var(--line); background: #151b17; }
 .listen-label { color: var(--dim); margin-bottom: 45px; }
 .voice-orb { width: 104px; height: 104px; margin: 0 auto 26px; position: relative; display: grid; place-items: center; }
