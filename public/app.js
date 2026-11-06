@@ -9,7 +9,7 @@ const els = {
 };
 const state = {
   book: null, current: 0, voiceReady: false, voiceState: 'loading', queue: [], queueIndex: -1,
-  playing: false, playback: 'idle', activeEngine: null, words: [], currentPassage: '', generation: 0,
+  playing: false, playback: 'idle', playbackRate: els.audio.playbackRate, activeEngine: null, words: [], currentPassage: '', generation: 0,
   browserUtterance: null, pendingRender: null, nextRender: null, chapterText: '', paragraphTargets: [], queueOffsets: []
 };
 
@@ -132,6 +132,20 @@ function cancelNextRender() {
   state.nextRender?.controller.abort();
   state.nextRender = null;
 }
+function preserveAudioRate() {
+  state.playbackRate = els.audio.playbackRate;
+  // Native src/load resets playbackRate to defaultPlaybackRate. Keep both at
+  // the user's rate so source changes cannot reset speed or cancel playback.
+  els.audio.defaultPlaybackRate = state.playbackRate;
+}
+function changeAudioRate() {
+  // defaultPlaybackRate and source loads also queue ratechange events. Only
+  // an actual change from the retained rate invalidates rendering.
+  if (els.audio.playbackRate === state.playbackRate) return;
+  preserveAudioRate();
+  if (state.playback === 'pending') stopPlayback();
+  else cancelNextRender();
+}
 function prefetchNext() {
   if (state.activeEngine !== 'local' || state.queueIndex + 1 >= state.queue.length || state.nextRender) return;
   state.nextRender = renderRequest(state.queueIndex + 1);
@@ -161,6 +175,9 @@ async function playLocal() {
   try {
     const {data: rendered, error} = await request.result;
     if (generation !== state.generation || request.controller.signal.aborted) return;
+    // A user rate change can precede its queued native ratechange event.
+    changeAudioRate();
+    if (generation !== state.generation) return;
     if (error) throw error;
     state.words = rendered.words || []; highlightPassage(chunk);
     els.audio.src = rendered.audioUrl; els.audio.currentTime = 0;
@@ -183,7 +200,9 @@ function playBrowser() {
   utterance.onend = () => { if (current()) finishChunk(); };
   utterance.onerror = () => { if (current()) playbackError(new Error('The browser voice could not read this passage.'), generation); };
   utterance.onboundary = event => { if (current() && state.playing) setTextHighlight('sonora-word', state.queueOffsets[state.queueIndex] + event.charIndex, event.charLength || 3); };
-  state.browserUtterance = utterance; speechSynthesis.speak(utterance);
+  state.browserUtterance = utterance;
+  // cancel() discards utterances but preserves the synthesizer's paused flag.
+  speechSynthesis.resume(); speechSynthesis.speak(utterance);
 }
 function startQueue(offset = 0) {
   stopPlayback();
@@ -208,7 +227,7 @@ function stopPlayback() {
   state.generation++;
   state.pendingRender?.controller.abort(); state.pendingRender = null; cancelNextRender();
   state.browserUtterance = null; state.activeEngine = null; state.queueIndex = -1; state.words = []; state.currentPassage = '';
-  window.speechSynthesis?.cancel(); els.audio.pause(); els.audio.removeAttribute('src'); els.audio.load();
+  window.speechSynthesis?.cancel(); preserveAudioRate(); els.audio.pause(); els.audio.removeAttribute('src'); els.audio.load();
   setTextHighlight('sonora-word'); setTextHighlight('sonora-passage');
   setPlayback('idle'); els.voiceState.textContent = 'Listening stopped'; els.voiceDetail.textContent = 'Click a paragraph or listen again';
 }
@@ -262,10 +281,7 @@ els.bookText.addEventListener('keydown', selectParagraph);
 els.audio.addEventListener('timeupdate', () => { if (state.activeEngine === 'local' && state.playing) highlightWord(els.audio.currentTime); });
 els.audio.addEventListener('ended', () => { if (state.activeEngine === 'local') finishChunk(); });
 els.audio.addEventListener('error', () => { if (state.activeEngine === 'local') playbackError(new Error('The local audio could not be played.'), state.generation); });
-els.audio.addEventListener('ratechange', () => {
-  if (state.playback === 'pending') stopPlayback();
-  else cancelNextRender();
-});
+els.audio.addEventListener('ratechange', changeAudioRate);
 els.voiceSelect.addEventListener('change', stopPlayback);
 window.addEventListener('pagehide', stopPlayback);
 async function exportBook(preview) {

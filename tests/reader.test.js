@@ -97,7 +97,7 @@ for (const event of ['voice', 'speed']) {
     if (!page) return;
     await page.evaluate(`ignoreAbort = true; els.listen.click(); ${event === 'voice'
       ? "els.voiceSelect.value = 'af_bella'; els.voiceSelect.dispatchEvent(new Event('change'))"
-      : "els.audio.dispatchEvent(new Event('ratechange'))"}; renders[0].complete();`);
+      : "els.audio.playbackRate = 1.5; els.audio.dispatchEvent(new Event('ratechange'))"}; renders[0].complete();`);
     assert.equal(await page.evaluate('renders[0].aborted'), true);
     assert.equal(await page.evaluate('audioPlays'), 0);
     assert.equal(await page.evaluate('state.playback'), 'idle');

@@ -29,10 +29,16 @@ async function reader(t, { ready = true, nativeAudio = false, source } = {}) {
         renders.push(request);
       });
     };
+    // cancel() clears the queue but does not reset the real API's paused flag.
+    // This host has no native voices, so retain that state in the speech double.
+    let paused = false, current = null, started = false;
+    const startSpeech = () => { if (current && !paused && !started) { started = true; current.onstart?.(); } };
     Object.defineProperty(window, 'speechSynthesis', {value: {
-      cancel() { synthesisCalls.push('cancel'); },
-      speak(u) { synthesisCalls.push('speak'); utterances.push(u); u.onstart?.(); },
-      pause() { synthesisCalls.push('pause'); }, resume() { synthesisCalls.push('resume'); }
+      get paused() { return paused; }, get speaking() { return Boolean(current); }, get pending() { return Boolean(current && !started); },
+      cancel() { synthesisCalls.push('cancel'); current = null; started = false; },
+      speak(u) { synthesisCalls.push('speak'); utterances.push(u); current = u; started = false; startSpeech(); },
+      pause() { synthesisCalls.push('pause'); paused = true; },
+      resume() { synthesisCalls.push('resume'); paused = false; startSpeech(); }
     }});
     ${nativeAudio ? '' : `const audio = document.querySelector('#audio');
     window.audioPlays = 0; window.audioPauses = 0;
