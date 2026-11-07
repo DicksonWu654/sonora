@@ -404,6 +404,52 @@ test('containment falls back when an existing control becomes fixed', async (t) 
 });
 
 const { install: installArticle } = require('./helpers/overlay');
+test('large streamed Claude code is extracted in bounded tasks that yield to page interaction', async (t) => {
+  const page = await browser(
+    t,
+    '<main><div class="font-claude-response"><p>Generated code.</p><pre><code>' +
+      Array.from({ length: 20000 }, (_, at) => '<span>value' + at + '();</span>\n').join('') +
+      '</code></pre></div></main>',
+    'https://claude.ai/chat/streamed-code'
+  );
+  if (!page) return;
+  await installArticle(page);
+  await page.evaluate(`(() => {
+    window.streamReads = []; window.interactionTurns = 0;
+    const read = SonoraPassages.readableText;
+    SonoraPassages.readableText = (node, ...args) => {
+      const text = read(node, ...args);
+      if (node.matches('code')) streamReads.push({bounded:false,done:true,hasTail:text.endsWith('streamed_tail();'),interactionTurns});
+      return text;
+    };
+    const create = SonoraPassages.createTextReader;
+    SonoraPassages.createTextReader = (node, ...args) => {
+      const reader = create(node, ...args);
+      if (!node.matches('code')) return reader;
+      const advance = reader.advance;
+      reader.advance = (...args) => {
+        const result = advance.apply(reader, args);
+        streamReads.push({bounded:Number.isFinite(args[0]) && args[0] <= 4, done:result.done,
+          hasTail:result.text.endsWith('streamed_tail();'), interactionTurns});
+        if (!result.done) setTimeout(() => { interactionTurns++; }, 0);
+        return result;
+      };
+      return reader;
+    };
+    document.querySelector('code span:last-of-type').firstChild.appendData('streamed_tail();');
+  })()`);
+  await waitFor(page, 'streamReads.some(read => read.done)', 15000);
+  const reads = await page.evaluate('streamReads');
+  assert(
+    reads.every((read) => read.bounded),
+    JSON.stringify(reads)
+  );
+  assert(reads.length > 1, 'large code must span more than one extraction task');
+  assert(reads.at(-1).hasTail, 'the completed extraction includes the streamed edit');
+  assert(reads.at(-1).interactionTurns > 0, 'page tasks run before extraction completes');
+  assert.deepEqual(page.errors, []);
+});
+
 test('generic Claude toolbar traffic performs no discovery and edits touch only one message', async (t) => {
   const { claudeHtml } = require('./helpers/claude');
   const page = await browser(t, claudeHtml(), 'https://claude.ai/chat/mutations');

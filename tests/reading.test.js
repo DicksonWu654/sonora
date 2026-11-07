@@ -7,6 +7,51 @@ const { install: installRedraw } = require('./helpers/redraw');
 const { install: installArticle } = require('./helpers/overlay');
 const lastRender = `messages.findLast(message=>message.type==='sonora-render')?.text`;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+test('continuous Claude reading includes paragraphs appended while the answer streams', async (t) => {
+  const paragraphs = [
+    'Opening answer.',
+    'Second paragraph.',
+    'Third paragraph.',
+    'Fourth paragraph.',
+    'Fifth paragraph.'
+  ];
+  const page = await browser(
+    t,
+    '<main><div class="font-claude-response" id="answer">' +
+      paragraphs.map((text) => '<p>' + text + '</p>').join('') +
+      '</div></main>',
+    'https://claude.ai/chat/stream'
+  );
+  if (!page) return;
+  await installArticle(page);
+  await page.evaluate(`document.querySelector('p').click()`);
+  await waitFor(page, 'played.length === 1');
+  const tail = 'New paragraph in the streamed answer.';
+  await page.evaluate(`document.querySelector('#answer').insertAdjacentHTML('beforeend', '<p>${tail}</p>')`);
+  await waitFor(page, `/^6 clickable blocks/.test(panel.querySelector('.meta').textContent)`);
+  for (let at = 1; at < paragraphs.length; at++) {
+    await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('ended'))`);
+    await waitFor(
+      page,
+      `played.length > ${at} || panel.querySelector('.status span').textContent.includes('complete')`
+    );
+  }
+  // The old iterator is now exhausted; its last audio is already buffered.
+  const later = 'The final streamed paragraph also belongs in the queue.';
+  await page.evaluate(`document.querySelector('#answer').insertAdjacentHTML('beforeend', '<p>${later}</p>')`);
+  await waitFor(page, `/^7 clickable blocks/.test(panel.querySelector('.meta').textContent)`);
+  for (let at = paragraphs.length; at <= paragraphs.length + 2; at++) {
+    await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('ended'))`);
+    await waitFor(
+      page,
+      `played.length > ${at} || panel.querySelector('.status span').textContent.includes('complete')`
+    );
+  }
+  assert.deepEqual(await page.evaluate('played'), [...paragraphs, tail, later]);
+  assert.match(await page.evaluate(`panel.querySelector('.status span').textContent`), /complete/);
+  assert.deepEqual(page.errors, []);
+});
+
 test('the short opening prefetches its remainder while the first audio download is pending', async (t) => {
   const text = Array.from({ length: 70 }, (_, at) => 'word' + at).join(' ') + '. Following sentence.';
   const page = await browser(t, '<main><p>' + text + '</p></main>');

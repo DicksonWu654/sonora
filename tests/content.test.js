@@ -5,6 +5,54 @@ const path = require('node:path');
 const { browser, waitFor } = require('./helpers/browser');
 const { install, blocks } = require('./helpers/overlay');
 const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures/articles', name + '.html'), 'utf8');
+test('generic blocks retain prose surrounding inline equations and image descriptions', async (t) => {
+  const page = await browser(
+    t,
+    '<main><div>Energy equals <span class="katex">mc squared</span> in this equation.</div>' +
+      '<div>Take the path <img alt="beside the bridge"> and follow it north.</div><p>Conclusion.</p></main>',
+    'https://article.test/inline-content'
+  );
+  if (!page) return;
+  await install(page, { auto: true });
+  await page.evaluate(`panel.querySelector('.play').click()`);
+  await waitFor(page, `panel.querySelector('.status span').textContent.includes('complete')`);
+  assert.equal(
+    await page.evaluate("played.join(' ')"),
+    [
+      'Energy equals Equation. in this equation.',
+      'Take the path beside the bridge and follow it north.',
+      'Conclusion.'
+    ].join(' ')
+  );
+  assert.deepEqual(page.errors, []);
+});
+
+test('list items consume inline semantics once and retain separate nested list entries', async (t) => {
+  const page = await browser(
+    t,
+    '<main><ul><li>Energy <span class="katex">x squared</span> is conserved.</li>' +
+      '<li>Turn left <img alt="at the red bridge"> and continue.</li>' +
+      '<li><figure><img alt="Mountains"><figcaption>Mountains at dawn.</figcaption></figure>' +
+      '<ul><li>Nested direction.</li></ul></li></ul><p>Conclusion.</p></main>',
+    'https://article.test/list-content'
+  );
+  if (!page) return;
+  await install(page, { auto: true });
+  await page.evaluate(`document.querySelector('li').click()`);
+  await waitFor(page, `panel.querySelector('.status span').textContent.includes('complete')`);
+  assert.equal(
+    await page.evaluate("played.join(' ')"),
+    [
+      'Energy Equation. is conserved.',
+      'Turn left at the red bridge and continue.',
+      'Mountains at dawn.',
+      'Nested direction.',
+      'Conclusion.'
+    ].join(' ')
+  );
+  assert.deepEqual(page.errors, []);
+});
+
 test('editors receive clicks and drafts never enter the reading queue', async (t) => {
   const page = await browser(t, fixture('claude'), 'https://claude.ai/chat/audit');
   if (!page) return;

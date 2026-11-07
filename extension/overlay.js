@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.14';
+  const OVERLAY_VERSION = '0.4.15';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -349,6 +349,8 @@
   }
   let refreshTimer = null, refreshIdle = null;
   const dirtyScopes = new Map();
+  const scopeRefreshes = new Map();
+  let scopeRefreshHandle = null;
   let fullRefreshPending = false;
   let sourceUrl = location.href;
   const navigationTimer = setInterval(() => {
@@ -869,15 +871,17 @@
       && (compareNodes(entry.node, other.node) & Node.DOCUMENT_POSITION_FOLLOWING));
     following.sort((a, b) => compareNodes(a.node, b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
     const snapshot = state.queueBlocks = [selected, ...following.map(block => ({ ...block }))];
-    let opening = true;
-    for (let at = 0; at < snapshot.length || !indexingDone; at++) {
+    yield* queuedPassages(snapshot, offset);
+  }
+  function* queuedPassages(snapshot, offset = 0, start = 0, opening = true) {
+    for (let at = start; at < snapshot.length || !indexingDone || scopeRefreshes.size || dirtyScopes.size; at++) {
       if (at >= snapshot.length) { yield null; at--; continue; }
       const block = snapshot[at];
       // A block selected earlier may already be known far beyond the scan.
       // Wait for discovery to fill the gap before buffering that later block.
       if (at && !indexingDone && (!discoveryFrontier
         || (compareNodes(block.node, discoveryFrontier) & Node.DOCUMENT_POSITION_PRECEDING))) { yield null; at--; continue; }
-      let cursor = block === selected ? offset : 0, unfinishedUrl = false;
+      let cursor = at === start ? offset : 0, unfinishedUrl = false;
       while (cursor < block.text.length || block.partial) {
         if (cursor >= block.text.length || !opening && block.partial && block.text.length - cursor < 1201) { yield null; continue; }
         if (unfinishedUrl) {
@@ -1325,39 +1329,16 @@
     refreshTimer = null;
     const navigated = !isGoogleDocsPage() && window.SonoraPassages.pageIdentity(sourceUrl) !== window.SonoraPassages.pageIdentity(location.href);
     if (!isGoogleDocsPage() && dirtyScopes.size && !fullRefreshPending && !navigated && source.root?.isConnected) {
-      const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
       for (const [scope, node] of dirtyScopes) {
-        const previous = entriesByScope.get(scope) || [];
-        const next = reconcileEntries(previous, makeIncomingEntries(node.isConnected ? selectReadableBlocks(node, source.noiseSelector) : []));
-        previous.forEach(entry => {
-          characterCount -= entry.text.length;
-          entryCount--;
-          if (entry.kind === 'code') codeEntryCount--;
-          entriesByKey.delete(entry.key);
-          entriesByNode.delete(entry.node);
-          knownBlocks.delete(entry.node);
-          entry.node.classList.remove(pageClass, currentClass, 'sonora-code-block');
-        });
-        entriesByScope.delete(scope);
-        next.forEach(entry => {
-          indexEntry(entry);
-          markReadable(entry.node, entry);
-          knownBlocks.add(entry.node);
-        });
-        if (activeItem && previous.some(entry => entry.key === activeItem.blockKey)) {
-          const activeEntry = entriesByKey.get(activeItem.blockKey);
-          if (activeEntry && !window.SonoraPassages.matchesPassage(activeEntry, activeItem)) {
-            stop();
-            state.queue = [];
-            setStatus('This passage changed — click it to read the updated text.', 'ready');
-          } else if (activeEntry) markCurrentBlock(activeEntry.index, activeEntry.key);
-        }
+        scopeRefreshes.set(scope, { node, candidates: window.SonoraPassages.blockCandidates(node, source.noiseSelector, observeShadow), incoming: [], reading: null });
       }
-      orderedEntriesDirty = true;
       dirtyScopes.clear();
-      updateMeta();
+      if (scopeRefreshHandle === null) scopeRefreshHandle = setTimeout(refreshScopedBatch, 0);
       return;
     }
+    if (scopeRefreshHandle !== null) clearTimeout(scopeRefreshHandle);
+    scopeRefreshHandle = null;
+    scopeRefreshes.clear();
     dirtyScopes.clear();
     fullRefreshPending = false;
     if (navigated) { stop(); state.queue = []; state.queueIterator = state.queueBlocks = state.queueStart = null; orderedEntriesDirty = false; pageEntries = []; reconcileEntries = window.SonoraPassages.createReconciler(); }
@@ -1378,6 +1359,73 @@
     knownBlocks.forEach(node => dirtyTextNodes.add(node));
     const nextBlocks = selectReadableBlocks(source.root, source.noiseSelector);
     updateBlocks(nextBlocks, navigated);
+  }
+  function refreshScopedBatch() {
+    scopeRefreshHandle = null;
+    if (state.closed) return;
+    if ((performance.now() - lastPositionChange < 150 && !state.queueWaiting) || priorityReaders.size) {
+      scopeRefreshHandle = setTimeout(refreshScopedBatch, 150); return;
+    }
+    const started = performance.now();
+    do {
+      const first = scopeRefreshes.entries().next();
+      if (first.done) break;
+      const [scope, job] = first.value;
+      if (!job.node.isConnected) { job.incoming = []; job.reading = null; }
+      if (job.reading) {
+        const { node, reader, version } = job.reading;
+        if (!node.isConnected) { job.reading = null; continue; }
+        const result = reader.advance(2);
+        if (!result.done) break;
+        if (version !== (textVersions.get(node) || 0)) {
+          job.reading = scopedReader(node); break;
+        }
+        extractionCache.set(node, { epoch: insertionEpoch, text: result.text, revision: ++domRevision });
+        dirtyTextNodes.delete(node);
+        job.incoming.push(...makeIncomingEntries([node]));
+        job.reading = null;
+      } else {
+        const next = job.node.isConnected ? job.candidates.next() : { done: true };
+        if (next.done) {
+          scopeRefreshes.delete(scope);
+          commitScopedEntries(scope, job.incoming);
+          resumeDiscoveredQueue(); updateMeta();
+          continue;
+        }
+        const node = next.value;
+        if (!window.SonoraPassages.visibleBlock(node, isChatGPTPage())) continue;
+        const cached = extractionCache.get(node);
+        if (cached && !cached.partial && !isTextDirty(node)) job.incoming.push(...makeIncomingEntries([node]));
+        else job.reading = scopedReader(node);
+      }
+    } while (performance.now() - started < 4);
+    if (scopeRefreshes.size) scopeRefreshHandle = setTimeout(refreshScopedBatch, 16);
+  }
+  function scopedReader(node) {
+    return { node, version: textVersions.get(node) || 0,
+      reader: window.SonoraPassages.createTextReader(node.matches('pre') ? node.querySelector('code') || node : node, cleanText) };
+  }
+  function commitScopedEntries(scope, incoming) {
+    const previous = entriesByScope.get(scope) || [];
+    const next = reconcileEntries(previous, incoming);
+    const activeItem = state.queue[state.index >= 0 ? state.index : (state.pendingStart ?? 0)];
+    previous.forEach(entry => {
+      characterCount -= entry.text.length; entryCount--;
+      if (entry.kind === 'code') codeEntryCount--;
+      entriesByKey.delete(entry.key); entriesByNode.delete(entry.node); knownBlocks.delete(entry.node);
+      entry.node.classList.remove(pageClass, currentClass, 'sonora-code-block');
+    });
+    entriesByScope.delete(scope);
+    next.forEach(entry => {
+      indexEntry(entry); markReadable(entry.node, entry); includeQueuedEntry(entry);
+    });
+    if (activeItem && previous.some(entry => entry.key === activeItem.blockKey)) {
+      const activeEntry = entriesByKey.get(activeItem.blockKey);
+      if (activeEntry && !window.SonoraPassages.matchesPassage(activeEntry, activeItem)) {
+        stop(); state.queue = []; setStatus('This passage changed — click it to read the updated text.', 'ready');
+      } else if (activeEntry) markCurrentBlock(activeEntry.index, activeEntry.key);
+    }
+    orderedEntriesDirty = true;
   }
   function scheduleBlockRefresh(records) {
     if (sourceUrl !== location.href) pageType = pageTypeFor(location.href);
@@ -1517,21 +1565,33 @@
         entry.index = blockEntries.length;
         indexEntry(entry); blockEntries.push(entry);
         markReadable(node, entry);
-        const snapshot = state.queueBlocks;
-        if (snapshot && (compareNodes(snapshot[0].node, node) & Node.DOCUMENT_POSITION_FOLLOWING)
-          && !snapshot.some(block => block.key === entry.key)) {
-          let low = 1, high = snapshot.length;
-          while (low < high) {
-            const middle = (low + high) >> 1;
-            if (compareNodes(snapshot[middle].node, node) & Node.DOCUMENT_POSITION_FOLLOWING) low = middle + 1;
-            else high = middle;
-          }
-          snapshot.splice(low, 0, { ...entry });
-        }
+        includeQueuedEntry(entry);
       }
     }
     // Give the panel its first paint and install click handlers before indexing.
     discoveryHandle = setTimeout(batch, 50);
+  }
+  function includeQueuedEntry(entry) {
+    const snapshot = state.queueBlocks;
+    if (!snapshot || !(compareNodes(snapshot[0].node, entry.node) & Node.DOCUMENT_POSITION_FOLLOWING)
+      || snapshot.some(block => block.key === entry.key)) return;
+    let low = 1, high = snapshot.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (compareNodes(snapshot[middle].node, entry.node) & Node.DOCUMENT_POSITION_FOLLOWING) low = middle + 1;
+      else high = middle;
+    }
+    // Preserve the buffered reading order through earlier insertions. Adding
+    // before its tail could replay blocks already consumed by the iterator.
+    const buffered = state.queue.at(-1);
+    const tail = buffered && snapshot.find(block => block.key === buffered.blockKey);
+    if (tail && (compareNodes(entry.node, tail.node) & Node.DOCUMENT_POSITION_FOLLOWING)) return;
+    snapshot.splice(low, 0, { ...entry });
+    // The old tail may already be buffered, leaving an exhausted iterator.
+    // Continue at newly appended content without replaying that buffered tail.
+    if (!state.queueIterator && !state.completed && state.index >= 0) {
+      state.queueIterator = queuedPassages(snapshot, 0, low, false);
+    }
   }
   discoverPage();
   source.blocks = [];
@@ -1781,7 +1841,7 @@
       }
       play(state.index + 1);
     }
-    else if (state.queueIterator) {
+    else if (state.queueIterator || !isGoogleDocsPage() && (scopeRefreshes.size || dirtyScopes.size || fullRefreshPending)) {
       state.queueWaiting = true;
       state.pendingRender = false;
       resetWords();
@@ -1844,6 +1904,8 @@
   }
   els.minimize.addEventListener('click', togglePanel);
   const leaveDocument = () => {
+    ownsPlayback = false;
+    state.revision++;
     state.pendingStart = null;
     pausePlayback();
     message({ type: 'sonora-document-left' }).catch(() => {});
@@ -1883,6 +1945,8 @@
     window.removeEventListener('hashchange', scheduleBlockRefresh);
     if (refreshTimer) clearTimeout(refreshTimer);
     if (refreshIdle !== null) cancelIdleCallback(refreshIdle);
+    if (scopeRefreshHandle !== null) clearTimeout(scopeRefreshHandle);
+    scopeRefreshes.clear();
     if (discoveryHandle !== null) clearTimeout(discoveryHandle);
     if (panelPaintFrame !== null) cancelAnimationFrame(panelPaintFrame);
     discoveryGeneration++;

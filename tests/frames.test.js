@@ -235,6 +235,46 @@ test('unpacked access page discloses the Claude service pattern and one grant co
   assert.deepEqual(f.worker.errors, []);
 });
 const { fixture: nativeFixture, readyDocument, until } = require('./helpers/native-reader');
+test('Back restores a paused reader that reclaims playback ownership before resuming', async (t) => {
+  const f = await nativeFixture(t);
+  if (!f) return;
+  await f.open('/a');
+  await f.inTab(
+    '/a',
+    `(() => {window.historyRestored=false; addEventListener('pageshow', event => {window.historyRestored=event.persisted;}); document.querySelector('p').click();})()`
+  );
+  await f.waitInTab('/a', `nativeSources.some(source => source.started && !source.stopped && !source.ended)`);
+  await f.page.send('Page.navigate', { url: f.base + '/away' });
+  await readyDocument(f.page, `location.pathname==='/away' && document.readyState==='complete'`);
+  const next = await f.cdp.send('Target.createTarget', { url: f.base + '/b' });
+  const second = await target(t, f.page.port, (item) => item.id === next.targetId);
+  await readyDocument(second, `document.readyState==='complete' && Boolean(document.querySelector('p'))`);
+  await f.open('/b');
+  await f.inTab('/b', `document.querySelector('p').click()`);
+  await f.waitInTab('/b', `nativeSources.some(source => source.started && !source.stopped && !source.ended)`);
+  const history = await f.page.send('Page.getNavigationHistory');
+  const original = history.entries.find((entry) => entry.url === f.base + '/a');
+  await f.page.send('Page.navigateToHistoryEntry', { entryId: original.id });
+  await readyDocument(f.page, `location.pathname==='/a' && document.readyState==='complete'`);
+  assert.equal(await f.inTab('/a', 'window.historyRestored'), true, 'use Chromium back/forward cache, not reinjection');
+  await f.inTab('/a', `panel.querySelector('.play').click()`);
+  await f.waitInTab('/a', `nativeSources.some(source => source.started && !source.stopped && !source.ended)`);
+  assert.equal(
+    await f.inTab('/b', `nativeSources.every(source => !source.started || source.stopped || source.ended)`),
+    true
+  );
+  const owner = await f.worker.evaluate(
+    `chrome.storage.session.get('sonoraPlaybackOwner').then(saved => saved.sonoraPlaybackOwner)`
+  );
+  const tab = await f.worker.evaluate(
+    `chrome.tabs.query({url:${JSON.stringify(f.base + '/a')}}).then(tabs => tabs[0].id)`
+  );
+  assert.equal(owner.tab.id, tab);
+  assert.deepEqual(f.page.errors, []);
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual(f.worker.errors, []);
+});
+
 test('unpacked tab close aborts the pending HTTP render connection', async (t) => {
   const f = await nativeFixture(t);
   if (!f) return;

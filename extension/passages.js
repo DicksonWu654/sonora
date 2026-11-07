@@ -121,16 +121,17 @@
     return createTextReader(node, cleanText).advance(Infinity, limit).text;
   }
 
-  const semanticSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,td,th,caption,figcaption,summary,img[alt],li,dt,dd,[role="cell"],[role="gridcell"],' + mathSelector;
+  const semanticSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,td,th,caption,figcaption,summary,li,dt,dd,[role="cell"],[role="gridcell"]';
   const customSelector = '[data-block-id],[data-slate-node="element"],[data-lexical-node="true"],[data-testid*="paragraph" i],[role="heading"],[role="paragraph"],[role="article"],[role="listitem"]';
-  const blockSelector = semanticSelector + ',' + customSelector + ',.commtext';
+  const containerSelector = semanticSelector + ',' + customSelector + ',.commtext';
+  const blockSelector = containerSelector + ',img[alt],' + mathSelector;
 
   // One traversal, with syntax spans and semantic block contents pruned. The
   // caller may stop between candidates instead of synchronously scanning a page.
   function* blockCandidates(root, noiseSelector, onShadow = null) {
     if (!root) return;
     const directText = [...root.childNodes].some(child => child.nodeType === 3 && /\S/u.test(child.data));
-    if ((root.matches?.(blockSelector) && !root.matches('li,td,' + customSelector)) || directText && !root.querySelector(blockSelector)) { yield root; return; }
+    if ((root.matches?.(blockSelector) && !root.matches('li,td,' + customSelector)) || directText && !root.querySelector(containerSelector)) { yield root; return; }
     const selectedLists = new WeakSet();
     const codeContainers = new WeakMap();
     const assigned = new WeakMap();
@@ -151,7 +152,9 @@
       else if (node.matches(blockSelector)) {
         if (isCodeChrome(node, root, codeContainers)) descend = false;
         else if (node.matches('td,th') && node.querySelector('table,.commtext')) descend = true;
-        else if (node.matches('summary') && selectedLists.has(node.closest('li'))) descend = false;
+        // A selected list item already narrates its inline semantics and
+        // captions. Still traverse wrappers to reach separate nested items.
+        else if (!node.matches('li') && selectedLists.has(node.closest('li'))) descend = false;
         else {
           const nested = node.matches('li,dt,dd,blockquote,' + customSelector)
             && !node.matches('dt,dd,blockquote,.commtext') && node.querySelector(semanticSelector + ',' + customSelector);
@@ -160,7 +163,7 @@
         }
       } else if (node.matches('div,section,span,[role="text"],[aria-label]') && !node.closest('pre') && !selectedLists.has(node.closest('li'))) {
         const direct = [...node.childNodes].some(child => child.nodeType === 3 && /\S/u.test(child.data));
-        if (direct && !node.querySelector(blockSelector) && !isCodeChrome(node, root, codeContainers)) { candidate = true; descend = false; }
+        if (direct && !node.querySelector(containerSelector) && !isCodeChrome(node, root, codeContainers)) { candidate = true; descend = false; }
         else if (!node.firstElementChild && node.getAttribute('aria-label')?.length > 0) candidate = true;
       }
       // A caller may yield between batches while React replaces this turn.
