@@ -292,6 +292,24 @@ test('unpacked tab close aborts the pending HTTP render connection', async (t) =
   assert.deepEqual(f.worker.errors, []);
 });
 
+test('single-page history updates, as ChatGPT makes while reading, do not cancel a pending render', async (t) => {
+  const f = await nativeFixture(t);
+  if (!f) return;
+  const opened = await f.cdp.send('Target.createTarget', { url: f.base + '/slow' });
+  const slow = await target(t, f.page.port, (item) => item.id === opened.targetId);
+  await readyDocument(slow, `document.readyState === 'complete' && Boolean(document.querySelector('p'))`);
+  await f.open('/slow');
+  await f.inTab('/slow', `document.querySelector('p').click()`);
+  await until(() => f.slow.length > 0);
+  await slow.evaluate(`history.replaceState({}, '', '/slow?model=other'); history.pushState({}, '', '/slow?model=third')`);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(f.slow[0].closed, false, 'tabs.onUpdated reports loading for history.replaceState; the render must survive');
+  assert.doesNotMatch(await f.inTab('/slow?model=third', `panel.querySelector('.status span').textContent`), /cancelled/);
+  await f.cdp.send('Target.closeTarget', { targetId: opened.targetId });
+  await until(() => f.slow[0].closed);
+  assert.deepEqual(f.worker.errors, []);
+});
+
 test('unpacked extension stops native audio in the previous tab before starting the next', async (t) => {
   const f = await nativeFixture(t);
   if (!f) return;

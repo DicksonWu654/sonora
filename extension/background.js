@@ -40,7 +40,10 @@ chrome.tabs?.onRemoved?.addListener(tabId => {
   cancelDocument(`${tabId}:`);
   readersLoaded.then(() => { tabReaders.delete(tabId); saveReaders(); });
 });
-chrome.tabs?.onUpdated?.addListener((tabId, info) => { if (info.status === 'loading') cancelDocument(`${tabId}:`); });
+// Only a committed top-level document replaces the reader. tabs.onUpdated also reports
+// "loading" for history.pushState/replaceState, which single-page apps such as ChatGPT
+// call during ordinary reading and which must not abort an in-flight render.
+chrome.webNavigation?.onCommitted?.addListener(details => { if (details.frameId === 0) cancelDocument(`${details.tabId}:`); });
 const FETCH_TIMEOUT_MS = 30000;
 const RENDER_TIMEOUT_MS = 120000;
 
