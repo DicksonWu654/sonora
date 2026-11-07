@@ -1,8 +1,8 @@
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { browser, waitFor } = require('./browser');
-const { connect, target } = require('./unpacked');
+const { browser, waitFor, extensionArgs } = require('./browser');
+const { connect, target, resetExtension } = require('./unpacked');
 
 async function ready(page, expression) {
   const end = Date.now() + 15000;
@@ -12,7 +12,7 @@ async function ready(page, expression) {
     } catch (error) {
       if (!/Execution context was destroyed|Cannot find context/.test(error.message)) throw error;
     }
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 20));
   } while (Date.now() < end);
   throw Error('Document did not become ready: ' + expression);
 }
@@ -67,7 +67,7 @@ async function fixture(t, html) {
       res.setHeader('content-type', 'text/html; charset=utf-8');
       res.end(
         index === 0
-          ? html(urls)
+          ? html(urls, req)
           : '<!doctype html><title>Embedded ' +
               index +
               '</title><main><p id="read">Readable embedded document ' +
@@ -75,26 +75,20 @@ async function fixture(t, html) {
               '.</p><p>Following prose.</p></main>'
       );
     });
-    await new Promise(resolve => server.listen(0, host, resolve));
+    await new Promise((resolve) => server.listen(0, host, resolve));
     servers.push(server);
     urls.push(`http://${host}:${server.address().port}`);
   }
   t.after(async () => {
     for (const server of servers) {
       server.closeAllConnections();
-      await new Promise(resolve => server.close(resolve));
+      await new Promise((resolve) => server.close(resolve));
     }
   });
   const extension = path.join(__dirname, '../../extension');
   const page = await browser(t, null, urls[0] + '/page', {
     network: true,
-    args: [
-      '--enable-unsafe-extension-debugging',
-      '--autoplay-policy=no-user-gesture-required',
-      '--window-size=1440,1000',
-      `--disable-extensions-except=${extension}`,
-      `--load-extension=${extension}`
-    ]
+    args: extensionArgs()
   });
   if (!page) return null;
   await page.send('Emulation.setDeviceMetricsOverride', {
@@ -110,9 +104,10 @@ async function fixture(t, html) {
     .update(extension)
     .digest('hex')
     .slice(0, 32)
-    .replace(/./g, c => String.fromCharCode(97 + parseInt(c, 16)));
-  const worker = await target(t, page.port, item => item.url === `chrome-extension://${id}/background.js`);
+    .replace(/./g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
+  const worker = await target(t, page.port, (item) => item.url === `chrome-extension://${id}/background.js`);
   await ready(worker, 'Boolean(globalThis.chrome?.storage?.local)');
+  await resetExtension(worker);
   await worker.evaluate(`chrome.storage.local.set({sonoraServer:${JSON.stringify(urls[0])}})`);
   const tabId = await worker.evaluate(
     `chrome.tabs.query({url:${JSON.stringify(urls[0] + '/*')}}).then(tabs=>tabs[0].id)`
@@ -127,14 +122,15 @@ async function fixture(t, html) {
   const inFrame = (frameId, code) => worker.evaluate(expression(frameId, code));
   const waitInFrame = (frameId, code) => waitFor(worker, expression(frameId, code));
   async function toolbar() {
+    const address = await page.evaluate('location.href');
     const tab = (await cdp.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }] })).targetInfos.find(
-      item => item.url === urls[0] + '/page'
+      (item) => item.url === address
     );
     await cdp.send('Extensions.triggerAction', { id, targetId: tab.targetId });
   }
   async function grant(pattern) {
     const opened = await cdp.send('Target.createTarget', { url: 'chrome://extensions/' });
-    const settings = await target(t, page.port, item => item.id === opened.targetId);
+    const settings = await target(t, page.port, (item) => item.id === opened.targetId);
     await ready(settings, 'Boolean(globalThis.chrome?.developerPrivate)');
     await settings.evaluate(
       `chrome.developerPrivate.addHostPermission(${JSON.stringify(id)},${JSON.stringify(pattern)})`
@@ -145,7 +141,7 @@ async function fixture(t, html) {
     const access = await cdp.send('Target.createTarget', {
       url: `chrome-extension://${id}/frame-permission.html?` + new URLSearchParams({ origin: pattern })
     });
-    const prompt = await target(t, page.port, item => item.id === access.targetId);
+    const prompt = await target(t, page.port, (item) => item.id === access.targetId);
     await ready(
       prompt,
       `document.readyState==='complete' && location.pathname==='/frame-permission.html' && Boolean(globalThis.chrome?.permissions?.request)`
@@ -160,7 +156,7 @@ async function fixture(t, html) {
       throw new Error('Could not grant fixture host: ' + JSON.stringify(response));
     await cdp.send('Target.closeTarget', { targetId: access.targetId });
     const top = (await cdp.send('Target.getTargets')).targetInfos.find(
-      item => item.type === 'page' && item.url === urls[0] + '/page'
+      (item) => item.type === 'page' && item.url === urls[0] + '/page'
     );
     await cdp.send('Target.activateTarget', { targetId: top.targetId });
   }

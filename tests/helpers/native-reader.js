@@ -3,9 +3,8 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { browser, waitFor } = require('./helpers/browser');
-const { connect, target } = require('./helpers/unpacked');
-
+const { browser, waitFor, extensionArgs } = require('./browser');
+const { connect, target, resetExtension } = require('./unpacked');
 function pdf() {
   let value = '%PDF-1.4\n';
   const offsets = [0];
@@ -28,7 +27,6 @@ function pdf() {
     .join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${start}\n%%EOF\n`;
   return Buffer.from(value);
 }
-
 async function fixture(t) {
   const requests = [],
     slow = [];
@@ -94,15 +92,10 @@ async function fixture(t) {
     await new Promise((resolve) => server.close(resolve));
   });
   const base = `http://127.0.0.1:${server.address().port}`;
-  const extension = path.join(__dirname, '../extension');
+  const extension = path.join(__dirname, '../../extension');
   const page = await browser(t, null, base + '/a', {
     network: true,
-    args: [
-      '--enable-unsafe-extension-debugging',
-      '--autoplay-policy=no-user-gesture-required',
-      `--disable-extensions-except=${extension}`,
-      `--load-extension=${extension}`
-    ]
+    args: extensionArgs()
   });
   if (!page) return null;
   const version = await (await fetch(`http://127.0.0.1:${page.port}/json/version`)).json();
@@ -115,6 +108,7 @@ async function fixture(t) {
     .replace(/./g, (char) => String.fromCharCode(97 + parseInt(char, 16)));
   const worker = await target(t, page.port, (item) => item.url === `chrome-extension://${id}/background.js`);
   await readyDocument(worker, 'Boolean(globalThis.chrome?.storage?.local)');
+  await resetExtension(worker);
   await worker.evaluate(`chrome.storage.local.set({sonoraServer:${JSON.stringify(base)}})`);
   const expression = (suffix, code) => `chrome.tabs.query({url:${JSON.stringify(base + suffix)}}).then(async tabs => {
     const results = await chrome.scripting.executeScript({target:{tabId:tabs[0].id},func:() => {
@@ -151,13 +145,11 @@ async function fixture(t) {
   }
   return { page, cdp, worker, base, requests, slow, open, inTab, waitInTab };
 }
-
 async function until(predicate) {
   const deadline = Date.now() + 10000;
   while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert(predicate());
 }
-
 async function readyDocument(page, expression) {
   const deadline = Date.now() + 10000;
   do {
@@ -170,77 +162,4 @@ async function readyDocument(page, expression) {
   } while (Date.now() < deadline);
   throw new Error('Document did not become ready: ' + expression);
 }
-
-test('audit2 #5 unpacked tab close aborts the pending HTTP render connection', async (t) => {
-  const f = await fixture(t);
-  if (!f) return;
-  const opened = await f.cdp.send('Target.createTarget', { url: f.base + '/slow' });
-  const slow = await target(t, f.page.port, (item) => item.id === opened.targetId);
-  await readyDocument(slow, `document.readyState === 'complete' && Boolean(document.querySelector('p'))`);
-  await f.open('/slow');
-  await f.inTab('/slow', `document.querySelector('p').click()`);
-  await until(() => f.slow.length > 0);
-  assert.equal(f.slow[0].closed, false);
-  await f.cdp.send('Target.closeTarget', { targetId: opened.targetId });
-  await until(() => f.slow[0].closed);
-  assert.deepEqual(f.worker.errors, []);
-});
-
-test('audit2 #8 unpacked extension stops native audio in the previous tab before starting the next', async (t) => {
-  const f = await fixture(t);
-  if (!f) return;
-  await f.open('/a');
-  await f.inTab('/a', `document.querySelector('p').click()`);
-  await f.waitInTab(
-    '/a',
-    `nativeSources.some(source => source.started && !source.ended) && panel.querySelector('.status span').textContent.startsWith('Playing')`
-  );
-  const next = await f.cdp.send('Target.createTarget', { url: f.base + '/b' });
-  const second = await target(t, f.page.port, (item) => item.id === next.targetId);
-  await readyDocument(second, `document.readyState === 'complete' && Boolean(document.querySelector('p'))`);
-  await f.open('/b');
-  await f.inTab('/b', `document.querySelector('p').click()`);
-  await f.waitInTab(
-    '/b',
-    `nativeSources.some(source => source.started && !source.ended) && panel.querySelector('.status span').textContent.startsWith('Playing')`
-  );
-  assert.equal(
-    await f.inTab('/a', 'nativeSources.every(source => !source.started || source.stopped || source.ended)'),
-    true
-  );
-  const first = (await f.cdp.send('Target.getTargets')).targetInfos.find(
-    (item) => item.url === f.base + '/a' && item.type === 'page'
-  );
-  await f.cdp.send('Target.activateTarget', { targetId: first.targetId });
-  await f.waitInTab('/a', `/Paused.*another tab/.test(panel.querySelector('.status span').textContent)`);
-  assert.equal(await f.inTab('/a', 'navigator.mediaSession.playbackState'), 'none');
-  assert.equal(await f.inTab('/b', 'navigator.mediaSession.playbackState'), 'playing');
-  assert(f.requests.some((request) => request.text.includes('/a')));
-  assert(f.requests.some((request) => request.text.includes('/b')));
-  assert.deepEqual(f.page.errors, []);
-  assert.deepEqual(second.errors, []);
-  assert.deepEqual(f.worker.errors, []);
-});
-
-test('audit2 #23 Chromium PDF viewer offers a working handoff to the existing import reader', async (t) => {
-  const f = await fixture(t);
-  if (!f) return;
-  const opened = await f.cdp.send('Target.createTarget', { url: f.base + '/document.pdf' });
-  const viewer = await target(t, f.page.port, (item) => item.id === opened.targetId);
-  await readyDocument(
-    viewer,
-    `document.readyState==='complete' && (document.contentType==='application/pdf' || Boolean(document.querySelector('embed[type="application/pdf"]')))`
-  );
-  await f.open('/document.pdf');
-  assert.match(await f.inTab('/document.pdf', `panel.querySelector('.meta').textContent`), /PDF.*reader/i);
-  assert.match(
-    await f.inTab('/document.pdf', `panel.querySelector('.selection-copy').textContent`),
-    /save.*import file/i
-  );
-  await f.inTab('/document.pdf', `panel.querySelector('.pdf-reader').click()`);
-  const reader = await target(t, f.page.port, (item) => item.type === 'page' && item.url === f.base + '/');
-  assert.equal(reader.target.url, f.base + '/');
-  assert.equal(f.requests.length, 0);
-  assert.deepEqual(viewer.errors, []);
-  assert.deepEqual(f.worker.errors, []);
-});
+module.exports = { fixture, readyDocument, until };

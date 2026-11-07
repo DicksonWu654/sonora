@@ -6,3 +6,10 @@
 - Run `npm test` and a short real Kokoro conversion for changes to narration or assembly. Do not narrate a whole book just to test.
 
 - Scroll comparisons use `tools/profile-scroll.cjs` with at least five interleaved repetitions, a fixed fixture hash and wheel path, and recorded host load. Report median/IQR from the inner-scrollport fixture.
+
+## Testing
+
+- Iterate with targeted feature files (`node --test tests/<feature>.test.js`).
+- Run `npm test` before committing: pure logic and five smoke cases share one browser; keep this tier under 10 seconds.
+- Run `npm run test:full` once before pushing. It covers the remaining browser, backend, import, and conversion regressions.
+- Do not repeat suite runs to prove stability unless investigating a flake. Keep one regression per user-visible bug class; share browsers within each feature file.

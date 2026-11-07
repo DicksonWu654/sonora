@@ -15,17 +15,10 @@ async function install(page, { auto = false, saved = {}, waitForIndex = true, re
       sendMessage(message, fn) {requests.push(message);if(rejectLongTokens&&message.type==='sonora-render'&&/\\S{500,}/u.test(message.text)){fn({ok:false,error:'Unsafe token'});return;}const src = 'audio-' + requests.length;sources.set(src,message.text);fn({ok:true,data:message.type === 'sonora-status' ? {ready:true} : {src,words:[]}});}
     }};
   })()`);
-  for (const file of [
-    'text.js',
-    'speed.js',
-    'tempo.js',
-    'docs.js',
-    'passages.js',
-    'speech.js',
-    'words.js',
-    'overlay.js'
-  ])
-    await page.evaluate(fs.readFileSync(path.join(__dirname, '../../extension', file), 'utf8'));
+  const files = ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'speech.js', 'words.js', 'overlay.js'];
+  await page.evaluate(
+    files.map((file) => fs.readFileSync(path.join(__dirname, '../../extension', file), 'utf8')).join('\n;\n')
+  );
   if (waitForIndex) await page.evaluate('window.__sonoraOverlay.whenIndexed');
 }
 const blocks = (page) =>

@@ -10,7 +10,8 @@
     "start": "node server.js",
     "voice:setup": "node tools/narration/setup.js",
     "voice:setup:gpu": "node tools/narration/setup-gpu.js",
-    "test": "node --test",
+    "test": "node tests/run.cjs fast",
+    "test:full": "node tests/run.cjs full",
     "release:zip": "node tools/release.js",
     "convert": "node tools/books/convert.js",
     "tunnel": "node tools/books/tunnel.js"
