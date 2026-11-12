@@ -12,7 +12,7 @@ async function install(page, { auto = false, saved = {}, waitForIndex = true, re
     HTMLMediaElement.prototype.play = async function() {played.push(sources.get(this.src)); if(autoPlayback) setTimeout(() => this.dispatchEvent(new Event('ended')), 0);};
     window.chrome = {storage: {local: {get: async () => saved, set: async value => Object.assign(saved, value)}}, runtime: {
       onMessage: {addListener(fn) {window.receive = fn;}, removeListener() {}},
-      sendMessage(message, fn) {requests.push(message);if(rejectLongTokens&&message.type==='sonora-render'&&/\\S{500,}/u.test(message.text)){fn({ok:false,error:'Unsafe token'});return;}const src = 'audio-' + requests.length;sources.set(src,message.text);fn({ok:true,data:message.type === 'sonora-status' ? {ready:true} : {src,words:[]}});}
+      sendMessage(message, fn) {requests.push(message);if(rejectLongTokens&&message.type==='sonora-render'&&/\\S{500,}/u.test(message.text)){fn({ok:false,status:422,error:'Unsafe token'});return;}const src = 'audio-' + requests.length;sources.set(src,message.text);fn({ok:true,data:message.type === 'sonora-status' ? {ready:true} : {src,words:[]}});}
     }};
   })()`);
   const files = ['text.js', 'speed.js', 'tempo.js', 'docs.js', 'passages.js', 'speech.js', 'words.js', 'overlay.js'];

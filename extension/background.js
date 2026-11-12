@@ -339,7 +339,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (!message || !['sonora-status', 'sonora-render'].includes(message.type)) return false;
   if (message.type === 'sonora-render' && !validation.validRenderText(message.text)) {
-    sendResponse({ ok: false, error: 'Sonora needs a readable passage under 4,000 characters.' });
+    sendResponse({ ok: false, status: 400, error: 'Sonora needs a readable passage under 4,000 characters.' });
     return false;
   }
   // Register before reading storage so a following cancellation cannot overtake it.
@@ -357,7 +357,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } : { signal: controller.signal };
     const response = await fetch(`${base}/api/narration/${message.type === 'sonora-render' ? 'render' : 'status'}`, options);
     let data; try { data = await response.json(); } catch (error) { controller.signal.throwIfAborted(); data = {}; }
-    if (!response.ok) throw new Error(data.error || `Sonora returned ${response.status}.`);
+    if (!response.ok) throw Object.assign(new Error(data.error || `Sonora returned ${response.status}.`), { status: response.status });
     if (message.type === 'sonora-render') {
       // Metadata means inference is finished; let the next inference overlap
       // this passage's WAV transfer, base64 conversion and browser decoding.
@@ -369,7 +369,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     controller.signal.throwIfAborted();
     sendResponse({ ok: true, data });
-  })().catch(error => sendResponse({ ok: false, error: controller.signal.reason?.message || error?.message || 'Sonora could not complete the request.' }))
+  })().catch(error => sendResponse({ ok: false, status: error?.status, error: controller.signal.reason?.message || error?.message || 'Sonora could not complete the request.' }))
     .finally(() => {
       clearTimeout(timer);
       if (renderControllers.get(requestKey) === controller) renderControllers.delete(requestKey);

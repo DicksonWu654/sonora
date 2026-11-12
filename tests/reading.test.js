@@ -432,3 +432,49 @@ test('continuous reading prefetches several passages ahead and skips unreadable 
   assert.deepEqual(await page.evaluate('played.filter(Boolean).map(text => text.slice(0, 6))'),
     ['Openin', 'Second', 'Third ', 'Fourth', 'Fifth ']);
 });
+test('look-ahead stays within the voice queue limit and treats 429/503 as retry-later, never skipping a passage', async (t) => {
+  const names = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'India', 'Juliet'];
+  const page = await browser(
+    t,
+    '<main><div class="font-claude-response">' + names.map((name) => `<p>${name} paragraph says something.</p>`).join('') + '</div></main>',
+    'https://claude.ai/chat/queue-limit'
+  );
+  if (!page) return;
+  await installArticle(page);
+  // Stub voice: cold start (503), then one worker, the real 6-pending limit
+  // (another tab holds 5 slots for a while) and 429 beyond it.
+  await page.evaluate(`(() => {
+    const began = performance.now(), jobs = []; let busy = false, phantom = 5;
+    window.maxPending = 0; window.limited = 0; window.coldRejected = 0;
+    setTimeout(() => { phantom = 0; }, 1500);
+    const pump = () => {
+      if (busy || !jobs.length) return;
+      busy = true;
+      const job = jobs.shift();
+      setTimeout(() => { busy = false; const src = 'audio-' + job.requestId; sources.set(src, job.text); job.done({ ok: true, data: { src, words: [] } }); pump(); }, 20);
+    };
+    chrome.runtime.sendMessage = (message, done) => {
+      requests.push(message);
+      if (message.type !== 'sonora-render') return done({ ok: true, data: { ready: true } });
+      if (performance.now() - began < 300) { coldRejected++; return done({ ok: false, status: 503, error: 'Sonora is starting.' }); }
+      const pending = jobs.length + (busy ? 1 : 0) + phantom;
+      if (pending >= 6) { limited++; return done({ ok: false, status: 429, error: 'The local voice queue is full.' }); }
+      jobs.push({ requestId: message.requestId, text: message.text, done });
+      maxPending = Math.max(maxPending, jobs.length + (busy ? 1 : 0));
+      pump();
+    };
+  })()`);
+  await page.evaluate(`document.querySelector('p').click()`);
+  for (let at = 1; at <= names.length; at++) {
+    await waitFor(page, `played.length >= ${at}`, 15000);
+    if (at < names.length) await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('ended'))`);
+  }
+  assert.deepEqual(
+    await page.evaluate('played.map(text => text.split(" ")[0])'),
+    names,
+    'every passage plays in order; none is skipped'
+  );
+  assert.ok((await page.evaluate('coldRejected')) > 0, 'the cold start rejected requests');
+  assert.ok((await page.evaluate('limited')) > 0, 'the full queue answered 429 and was retried');
+  assert.ok((await page.evaluate('maxPending')) <= 4, 'one reader keeps at most 4 renders in flight');
+});

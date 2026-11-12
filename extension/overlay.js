@@ -494,7 +494,7 @@
         chrome.runtime.sendMessage(payload, response => {
           const error = chrome.runtime.lastError;
           if (error) reject(new Error(error.message));
-          else if (!response?.ok) reject(new Error(response?.error || 'Sonora could not complete the request.'));
+          else if (!response?.ok) reject(Object.assign(new Error(response?.error || 'Sonora could not complete the request.'), { status: response?.status }));
           else resolve(response.data);
         });
       } catch (error) {
@@ -907,6 +907,11 @@
   const PREFETCH_AHEAD = 8;
   // Same rule as the narration worker: a passage needs a letter or digit.
   const hasReadableWords = text => /[\p{L}\p{N}]/u.test(text);
+  // The backend allows 6 pending jobs in all; one reader keeps at most 4 in flight.
+  const MAX_IN_FLIGHT = 4;
+  const retryable = error => error?.status === 429 || error?.status === 503;
+  const rejectedContent = error => Number.isInteger(error?.status) && !retryable(error);
+  const rejectedItems = new WeakSet();
   function prefetchAhead() {
     fillQueue();
     // Short passages play for under a second, so look ahead by amount of speech
@@ -915,9 +920,12 @@
     const budget = 150 * (Number(els.speed.value) || 1);
     for (let at = state.index + 1; at <= state.index + PREFETCH_AHEAD && at < state.queue.length && words < budget; at++) {
       const text = state.queue[at].text;
-      if (!hasReadableWords(text)) continue;
+      if (!hasReadableWords(text) || rejectedItems.has(state.queue[at])) continue;
       words += text.split(/\s+/u).length;
-      render(at).catch(() => {});
+      if (!state.rendered.has(at)) {
+        if (state.renderRequests.size >= MAX_IN_FLIGHT) break;
+        render(at).catch(() => {});
+      }
     }
   }
   function fillQueue() {
@@ -939,12 +947,32 @@
     if (state.rendered.has(index)) return state.rendered.get(index);
     const requestId = `${state.revision}:${index}:${Math.random().toString(36).slice(2)}`;
     const prepared = speech?.prepare(item.text);
-    const promise = message({ type: 'sonora-render', requestId, text: prepared?.text || item.text, voice: els.voice.value })
+    const requested = () => [...state.renderRequests.values()].includes(requestId);
+    const send = async () => {
+      // 429/503 mean the voice queue is full or still starting: retry later.
+      for (let attempt = 0; ; attempt++) {
+        try { return await message({ type: 'sonora-render', requestId, text: prepared?.text || item.text, voice: els.voice.value }); }
+        catch (error) {
+          if (!retryable(error) || attempt >= 40 || !requested()) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.min(2000, 250 * (attempt + 1))));
+          if (!requested()) throw error;
+        }
+      }
+    };
+    const promise = send()
       .then(result => prepared ? { ...result, words: speech.mapWords(prepared, result.words) } : result);
     state.rendered.set(index, promise);
     state.renderRequests.set(index, requestId);
-    promise.catch(() => { for (const [at, value] of state.rendered) if (value === promise) state.rendered.delete(at); })
-      .finally(() => { for (const [at, id] of state.renderRequests) if (id === requestId) state.renderRequests.delete(at); });
+    promise.then(() => true, error => {
+      for (const [at, value] of state.rendered) if (value === promise) state.rendered.delete(at);
+      const rejected = rejectedContent(error);
+      if (rejected) rejectedItems.add(item);
+      return rejected;
+    }).then(refill => {
+      for (const [at, id] of state.renderRequests) if (id === requestId) state.renderRequests.delete(at);
+      // A render slot freed up: queue the next look-ahead passage.
+      if (refill && !state.closed && (state.playing || state.pendingRender)) prefetchAhead();
+    });
     return promise;
   }
   async function claimPlayback(revision = state.revision) {
@@ -1000,7 +1028,7 @@
     state.queueWaiting = state.queueEnded = false;
     state.completed = false;
     state.playing = false;
-    if (!hasReadableWords(item.text)) {
+    if (!hasReadableWords(item.text) || rejectedItems.has(item)) {
       // Emoji, symbols or lone citation marks have nothing to say: move on now.
       state.pendingRender = false;
       advanceQueue(revision);
@@ -1063,7 +1091,7 @@
       prefetchAhead();
     } catch (error) {
       if (revision !== state.revision) return;
-      if (error.name !== 'NotAllowedError' && (state.renderFailures = (state.renderFailures || 0) + 1) <= 3
+      if (rejectedContent(error) && (state.renderFailures = (state.renderFailures || 0) + 1) <= 3
         && (index + 1 < state.queue.length || state.queueIterator)) {
         // A passage the voice cannot render must not hold up the ones after it.
         state.pendingRender = false;
