@@ -1,5 +1,5 @@
 (() => {
-  const OVERLAY_VERSION = '0.4.16';
+  const OVERLAY_VERSION = '0.4.17';
   if (window.__sonoraOverlay) {
     if (window.__sonoraOverlay.version === OVERLAY_VERSION) {
       window.__sonoraOverlay.toggle();
@@ -901,9 +901,28 @@
       }
     }
   }
+  // The backend renders one passage at a time in request order, so queueing a
+  // few passages ahead keeps a long passage from starting only when the short
+  // one before it ends. Abandoned requests are cancelled by trimRendered().
+  const PREFETCH_AHEAD = 8;
+  // Same rule as the narration worker: a passage needs a letter or digit.
+  const hasReadableWords = text => /[\p{L}\p{N}]/u.test(text);
+  function prefetchAhead() {
+    fillQueue();
+    // Short passages play for under a second, so look ahead by amount of speech
+    // (about a minute) as well as by count.
+    let words = 0;
+    const budget = 150 * (Number(els.speed.value) || 1);
+    for (let at = state.index + 1; at <= state.index + PREFETCH_AHEAD && at < state.queue.length && words < budget; at++) {
+      const text = state.queue[at].text;
+      if (!hasReadableWords(text)) continue;
+      words += text.split(/\s+/u).length;
+      render(at).catch(() => {});
+    }
+  }
   function fillQueue() {
     if (!state.queueIterator) return;
-    while (state.queue.length < state.index + 3) {
+    while (state.queue.length < state.index + PREFETCH_AHEAD + 1) {
       const next = state.queueIterator.next();
       if (next.done) { state.queueIterator = null; break; }
       if (!next.value) break;
@@ -952,7 +971,7 @@
     }
     if (state.closed || payload?.type !== 'sonora-render-ready') return;
     if (state.renderRequests.get(state.index) !== payload.requestId) return;
-    if (state.index + 1 < state.queue.length) render(state.index + 1).catch(() => {});
+    prefetchAhead();
     // Audio service setup must not delay sending the first render request.
     if (!state.audioContext) primeAudioContext();
   };
@@ -969,7 +988,7 @@
   }
   function trimRendered(index) {
     for (const key of state.rendered.keys()) {
-      if (key < index || key > index + 1) { cancelRender(key); state.rendered.delete(key); }
+      if (key < index || key > index + PREFETCH_AHEAD) { cancelRender(key); state.rendered.delete(key); }
     }
   }
   async function play(index = state.index < 0 ? 0 : state.index) {
@@ -981,6 +1000,12 @@
     state.queueWaiting = state.queueEnded = false;
     state.completed = false;
     state.playing = false;
+    if (!hasReadableWords(item.text)) {
+      // Emoji, symbols or lone citation marks have nothing to say: move on now.
+      state.pendingRender = false;
+      advanceQueue(revision);
+      return;
+    }
     state.pendingRender = true;
     resetWords();
     els.audio.pause();
@@ -1034,9 +1059,17 @@
       startWordFrames();
       setStatus(`Playing passage ${passageLabel(index)}`, 'ready');
       updateTransport();
-      if (index + 1 < state.queue.length) render(index + 1).catch(() => {});
+      state.renderFailures = 0;
+      prefetchAhead();
     } catch (error) {
       if (revision !== state.revision) return;
+      if (error.name !== 'NotAllowedError' && (state.renderFailures = (state.renderFailures || 0) + 1) <= 3
+        && (index + 1 < state.queue.length || state.queueIterator)) {
+        // A passage the voice cannot render must not hold up the ones after it.
+        state.pendingRender = false;
+        advanceQueue(revision);
+        return;
+      }
       state.pendingRender = false;
       state.playing = false;
       updateTransport();
@@ -1273,7 +1306,7 @@
         const queued = new Set(state.queue.map(item => item.blockKey));
         const added = queueFrom(last.index + 1, Math.max(0, remaining)).filter(item => !queued.has(item.blockKey));
         state.queue.push(...added);
-        if (added.length && state.playing && state.index + 1 < state.queue.length) render(state.index + 1).catch(() => {});
+        if (added.length && state.playing) prefetchAhead();
       }
     }
     if (!changed && state.index >= 0) {

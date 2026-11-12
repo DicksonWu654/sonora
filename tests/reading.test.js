@@ -411,3 +411,24 @@ test('unscoped ChatGPT additions and streamed edits refresh the reader', async (
   assert.equal(await page.evaluate(lastRender), 'New unscoped prose with streamed suffix.');
   assert.deepEqual(page.errors, []);
 });
+test('continuous reading prefetches several passages ahead and skips unreadable passages and failed renders', async (t) => {
+  const page = await browser(
+    t,
+    '<main><div class="font-claude-response"><p>Opening answer here.</p><p>[…]</p><p>Second paragraph.</p><p>' + 'x'.repeat(600) +
+      '</p><p>Third paragraph.</p><p>Fourth paragraph.</p><p>Fifth paragraph.</p></div></main>',
+    'https://claude.ai/chat/prefetch'
+  );
+  if (!page) return;
+  await installArticle(page, { rejectLongTokens: true });
+  await page.evaluate(`document.querySelector('p').click()`);
+  await waitFor(page, 'played.length === 1');
+  await waitFor(page, `requests.filter(m => m.type === 'sonora-render').length >= 4`);
+  for (let at = 1; at < 5; at++) {
+    await page.evaluate(`panel.querySelector('audio').dispatchEvent(new Event('ended'))`);
+    await waitFor(page, `played.length > ${at} || panel.querySelector('.status span').textContent.includes('complete')`);
+  }
+  const texts = await page.evaluate(`requests.filter(m => m.type === 'sonora-render').map(m => m.text)`);
+  assert.ok(!texts.some((text) => !/[\p{L}\p{N}]/u.test(text)), 'unreadable passages never reach the voice');
+  assert.deepEqual(await page.evaluate('played.filter(Boolean).map(text => text.slice(0, 6))'),
+    ['Openin', 'Second', 'Third ', 'Fourth', 'Fifth ']);
+});
